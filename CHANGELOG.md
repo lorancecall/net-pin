@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Removed the coexistence check with another network tool and the `netpin.ps1` file it relied on.
+
 ## 0.3.0
 
 First public release.

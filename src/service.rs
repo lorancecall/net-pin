@@ -22,8 +22,6 @@ const CHECK_EVERY: Duration = Duration::from_secs(300);
 static EVENTS: AtomicU64 = AtomicU64::new(0);
 /// Serializes reconcile / config writes between the watch loop and pipe requests.
 static WORK: Mutex<()> = Mutex::new(());
-/// The last Keel conflict logged (logged once, not on every pass).
-static WAITING: Mutex<Option<String>> = Mutex::new(None);
 
 unsafe extern "system" fn on_change(_: *const core::ffi::c_void, _: *const core::ffi::c_void, _: MIB_NOTIFICATION_TYPE) {
     EVENTS.fetch_add(1, Ordering::SeqCst);
@@ -56,21 +54,9 @@ impl Drop for Notifications {
     fn drop(&mut self) { for h in &self.0 { unsafe { let _ = CancelMibChangeNotify2(*h); } } }
 }
 
-/// One pass: brings the system to the config, unless Keel's network feature has it.
+/// One pass: brings the system to the config.
 fn pass(why: &str) {
     let _w = WORK.lock().unwrap();
-    let keel = crate::keel::conflict();
-    {
-        let mut last = WAITING.lock().unwrap();
-        if *last != keel {
-            match &keel { Some(k) => crate::log(format!("waiting: {k}")), None if last.is_some() => crate::log("Keel no longer has the network; resuming"), None => {} }
-            *last = keel.clone();
-        }
-    }
-    if keel.is_some() {
-        if let Ok(r) = crate::report() { crate::write_status(&r); }
-        return;
-    }
     match crate::reconcile() {
         Ok((0, 0)) => {}
         Ok((ok, bad)) => crate::log(format!("{why}: {ok} change(s), {bad} failed")),
@@ -158,7 +144,6 @@ pub struct Reply {
     pub pending: Vec<String>,
     pub problems: Vec<String>,
     pub notes: Vec<String>,
-    pub keel: Option<String>,
 }
 
 fn status(ok: bool, message: impl Into<String>) -> Reply {
@@ -172,7 +157,6 @@ fn status(ok: bool, message: impl Into<String>) -> Reply {
             r.pending = rep.plan.actions.iter().map(|a| a.to_string()).collect();
             r.problems = rep.plan.problems.clone();
             r.notes = rep.plan.notes.clone();
-            r.keel = rep.keel;
             r.networks = rep.cfg.networks.iter().map(|n| n.name.clone()).collect();
             r.config = Some(rep.cfg);
         }
@@ -201,10 +185,6 @@ fn change(f: impl FnOnce(&mut Config)) -> Result<String> {
     check_config(&old, &cfg)?;
     crate::save_config(&cfg)?;
     crate::log(format!("config changed: internet {}, {}", if cfg.internet.is_empty() { "Windows default" } else { &cfg.internet }, if cfg.enabled { "on" } else { "off" }));
-    if let Some(k) = crate::keel::conflict() {
-        if let Ok(r) = crate::report() { crate::write_status(&r); }
-        return Ok(format!("saved; {k}"));
-    }
     let (ok, bad) = crate::reconcile()?;
     Ok(format!("saved and applied: {ok} change(s){}", if bad > 0 { format!(", {bad} failed (see the log)") } else { String::new() }))
 }

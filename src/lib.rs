@@ -6,7 +6,6 @@
 //! (service / admin only): `config.toml`, `state.json` (values recorded before the first change),
 //! `status.json`, `net-pin.log`.
 pub mod fw;
-pub mod keel;
 pub mod model;
 pub mod paths;
 pub mod pipe;
@@ -81,8 +80,6 @@ pub struct Report {
     pub snap: Snapshot,
     pub state: State,
     pub plan: Plan,
-    /// Why net-pin must not change anything now (Keel's network feature).
-    pub keel: Option<String>,
 }
 
 /// Reads everything and plans (no admin needed).
@@ -91,7 +88,7 @@ pub fn report() -> Result<Report> {
     let snap = sys::snapshot()?;
     let state = load_state();
     let plan = model::plan(&cfg, &snap, &state);
-    Ok(Report { cfg, snap, state, plan, keel: keel::conflict() })
+    Ok(Report { cfg, snap, state, plan })
 }
 
 /// Brings the system to the config (admin): records originals first, then runs each action;
@@ -99,7 +96,6 @@ pub fn report() -> Result<Report> {
 pub fn reconcile() -> Result<(usize, usize)> {
     paths::ensure_may_write_data_dir()?;
     let r = report()?;
-    if let Some(why) = &r.keel { write_status(&r); anyhow::bail!("{why}; nothing changed"); }
     if r.plan.actions.is_empty() { write_status(&r); return Ok((0, 0)); }
     let (mut ok, mut bad) = run(&r)?;
     // Old rules go once the new ones exist (`model::plan`): a second pass for those only.
@@ -155,9 +151,8 @@ pub fn undo() -> Result<Vec<String>> {
 }
 
 /// For the tray icon: ok, blocked (a kill-switched VPN's network is down, so it is held offline),
-/// problem, off, waiting (Keel's network feature is on).
+/// problem, off.
 pub fn level(r: &Report) -> &'static str {
-    if r.keel.is_some() { return "waiting"; }
     if !r.cfg.enabled { return "off"; }
     if !r.plan.problems.is_empty() || !r.plan.actions.is_empty() { return "problem"; }
     let held = r.cfg.vpns.iter().any(|v| v.kill_switch && !r.snap.is_up(&r.cfg, &v.via));
@@ -166,7 +161,7 @@ pub fn level(r: &Report) -> &'static str {
 
 /// One line: where things go now (or why nothing is done).
 pub fn summary(r: &Report) -> String {
-    match &r.keel { Some(why) => why.clone(), None => model::summary(&r.cfg, &r.snap, &r.plan) }
+    model::summary(&r.cfg, &r.snap, &r.plan)
 }
 
 pub fn write_status(r: &Report) {
@@ -183,7 +178,6 @@ pub fn write_status(r: &Report) {
         "pending": r.plan.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         "problems": r.plan.problems,
         "notes": r.plan.notes,
-        "keel": r.keel,
         "networks": r.cfg.networks.iter().map(|n| n.name.clone()).collect::<Vec<_>>(),
     });
     let _ = std::fs::write(status_path(), serde_json::to_string_pretty(&st).unwrap_or_default());

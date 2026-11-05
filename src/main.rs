@@ -86,7 +86,6 @@ fn print_status(full: bool) -> Result<()> {
         println!("\nVPN network (lowest metric): {}; general internet: {}", s(&plan.follow), s(&plan.internet));
         println!("=> {}: {}", net_pin::level(&r).to_uppercase(), net_pin::summary(&r));
     }
-    if let Some(k) = &r.keel { println!("! {k}"); }
     for p in &plan.problems { println!("! {p}"); }
     for n in &plan.notes { println!("  note: {n}"); }
     if plan.actions.is_empty() { println!("apply would change nothing"); }

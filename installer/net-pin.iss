@@ -1,5 +1,5 @@
 ; Inno Setup script - build with .\build.ps1 (cargo build --release, tests, then ISCC.exe installer\net-pin.iss)
-#define AppVersion "0.3.0"
+#define AppVersion "0.3.1"
 
 [Setup]
 AppId={{5E0B8C51-7A2E-4B8F-9C3D-6F1A2B4E8D70}
@@ -33,9 +33,11 @@ Name: "tailscalewifi"; Description: "Keep Tailscale on Wi-Fi only (locked kill s
 [Files]
 Source: "..\target\release\net-pin.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\net-pin-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Keel detects net-pin by this file (its network feature then waits); it forwards to net-pin.exe.
-Source: "..\netpin.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Left by 0.3.0 installs.
+Type: files; Name: "{app}\netpin.ps1"
 
 [Icons]
 Name: "{group}\net-pin"; Filename: "{app}\net-pin-tray.exe"
@@ -84,37 +86,10 @@ begin
   if Kept <> Path then RegWriteExpandStringValue(HKEY_LOCAL_MACHINE, EnvKey, 'Path', Kept);
 end;
 
-{ Keel's network feature runs the same engine: only one of them may manage the network.
-  Mirrors keel.rs: the Keel service is installed and service.toml does not say net = false,
-  or Keel's recorded network changes (net-state.json) are still in place. }
-function KeelHasNetwork(var Why: String): Boolean;
-var Lines: TArrayOfString; I: Integer; S, Dir: String; NetOn: Boolean;
-begin
-  Result := False;
-  if not RegKeyExists(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Services\Keel') then exit;
-  Dir := ExpandConstant('{commonappdata}\keel');
-  NetOn := True;
-  if LoadStringsFromFile(Dir + '\service.toml', Lines) then
-    for I := 0 to GetArrayLength(Lines) - 1 do begin
-      S := Lowercase(Lines[I]);
-      StringChangeEx(S, ' ', '', True);
-      StringChangeEx(S, #9, '', True);
-      if S = 'net=false' then NetOn := False;
-    end;
-  if NetOn then begin
-    Why := 'Keel''s network feature is on. In an admin console run "keel feature net off", then "keel net undo", and run this setup again.';
-    Result := True;
-  end else if FileExists(Dir + '\net-state.json') then begin
-    Why := 'Keel''s network changes are still in place. In an admin console run "keel net undo", and run this setup again.';
-    Result := True;
-  end;
-end;
-
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-var rc: Integer; Why: String;
+var rc: Integer;
 begin
   Result := '';
-  if KeelHasNetwork(Why) then begin Result := Why; exit; end;
   { upgrade: release the running tray and service exes }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM net-pin-tray.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
   if FileExists(ExpandConstant('{app}\net-pin.exe')) then

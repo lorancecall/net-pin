@@ -434,7 +434,6 @@ mod tests {
         assert_eq!(look_of(Some(&mk("blocked")), true), Look::Blocked);
         assert_eq!(look_of(Some(&mk("off")), true), Look::Off);
         assert_eq!(look_of(Some(&mk("problem")), true), Look::Problem);
-        assert_eq!(look_of(Some(&mk("waiting")), true), Look::Problem);
         assert_eq!(look_of(Some(&mk("ok")), false), Look::Missing);
         assert_eq!(look_of(None, true), Look::Missing);
     }
