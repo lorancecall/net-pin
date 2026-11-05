@@ -1,0 +1,8 @@
+/target
+/dist
+*.tmp
+
+# Local agent notes
+AGENTS.md
+CLAUDE.md
+.claude/
