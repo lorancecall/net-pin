@@ -172,6 +172,7 @@ pub fn write_status(r: &Report) {
         "mode": if r.cfg.enabled { "on" } else { "off" },
         "level": level(r),
         "summary": summary(r),
+        "pins": model::pins(&r.cfg, &r.snap),
         "internet": r.plan.internet,
         "follow": r.plan.follow,
         "egress": r.snap.default_egress(&r.cfg).map(|a| a.alias.clone()),

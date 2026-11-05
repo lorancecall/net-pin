@@ -1,5 +1,5 @@
 ; Inno Setup script - build with .\build.ps1 (cargo build --release, tests, then ISCC.exe installer\net-pin.iss)
-#define AppVersion "0.3.1"
+#define AppVersion "0.3.2"
 
 [Setup]
 AppId={{5E0B8C51-7A2E-4B8F-9C3D-6F1A2B4E8D70}
@@ -26,9 +26,6 @@ UninstallDisplayIcon={app}\net-pin.exe
 ChangesEnvironment=yes
 ; The tray's Run value is per user (the user running setup).
 UsedUserAreasWarning=no
-
-[Tasks]
-Name: "tailscalewifi"; Description: "Keep Tailscale on Wi-Fi only (locked kill switch) and send general internet over the wired LAN"; Flags: unchecked
 
 [Files]
 Source: "..\target\release\net-pin.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -112,12 +109,14 @@ begin
   if CurStep = ssPostInstall then begin
     ForceDirectories(ExpandConstant('{commonappdata}\net-pin'));
     WizardForm.StatusLabel.Caption := 'Starting the net-pin service...';
-    if RunNetPin('service install', 'starting the service') and WizardIsTaskSelected('tailscalewifi') then
-      RunNetPin('preset tailscale-wifi', 'applying the tailscale-wifi preset');
+    RunNetPin('service install', 'starting the service');
   end;
   if CurStep = ssDone then
-    MsgBox('net-pin is installed. Open a new terminal for the net-pin command: net-pin status, net-pin help.' + #13#10#13#10 +
-           'If you keep Wi-Fi beside Ethernet (net-pin set keep-connected on, or the Tailscale preset), reboot once.', mbInformation, MB_OK);
+    MsgBox('net-pin is installed. It changes nothing until you tell it what to pin.' + #13#10#13#10 +
+           'Open a new terminal and run:' + #13#10 +
+           '  net-pin status        what is pinned where' + #13#10 +
+           '  net-pin help          all commands' + #13#10 +
+           '  net-pin preset        ready-made setups for common cases', mbInformation, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

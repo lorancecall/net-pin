@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::SystemTime;
 
+use net_pin::model::Pin;
 use net_pin::service::{self, Reply, Request};
 use serde::Deserialize;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -44,6 +45,8 @@ struct Status {
     networks: Vec<String>,
     #[serde(default)]
     problems: Vec<String>,
+    #[serde(default)]
+    pins: Vec<Pin>,
 }
 
 fn read_status() -> Option<Status> {
@@ -217,8 +220,12 @@ fn short_time(iso: &str) -> &str {
 
 struct Ui {
     tray: TrayIcon,
+    menu: Menu,
     status: MenuItem,
-    detail: MenuItem,
+    /// One row per pin (after the status line), then `rows_sep`; empty when nothing is pinned.
+    rows: Vec<MenuItem>,
+    rows_sep: PredefinedMenuItem,
+    shown: Option<Vec<Pin>>,
     internet: Submenu,
     /// "Windows decides" first, then one item per network (`None` = Windows decides).
     choices: Vec<(Option<String>, CheckMenuItem)>,
@@ -242,7 +249,6 @@ struct State {
 
 fn build_ui() -> Ui {
     let status = MenuItem::new("net-pin", false, None);
-    let detail = MenuItem::new("", false, None);
     let internet = Submenu::new("Internet", true);
     let enabled = CheckMenuItem::new("Routing on", true, true, None);
     let apply = MenuItem::new("Re-apply now", true, None);
@@ -252,7 +258,6 @@ fn build_ui() -> Ui {
     let menu = Menu::new();
     let _ = menu.append_items(&[
         &status,
-        &detail,
         &PredefinedMenuItem::separator(),
         &internet,
         &enabled,
@@ -263,15 +268,39 @@ fn build_ui() -> Ui {
         &quit,
     ]);
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu.clone()))
         .with_menu_on_left_click(true)
         .with_tooltip("net-pin")
         .with_icon(pin_icon(Look::Missing))
         .build()
         .expect("tray icon");
-    let mut ui = Ui { tray, status, detail, internet, choices: Vec::new(), enabled, apply, log, autostart, quit };
+    let mut ui = Ui { tray, menu, status, rows: Vec::new(), rows_sep: PredefinedMenuItem::separator(), shown: None,
+                      internet, choices: Vec::new(), enabled, apply, log, autostart, quit };
     set_choices(&mut ui, &["wifi".into(), "lan".into()]);
     ui
+}
+
+/// A menu row: what on the left, its network on the right (a tab right-aligns it in a Windows menu).
+fn row_text(p: &Pin) -> String {
+    let mut right = p.network.clone();
+    if !p.up { right.push_str(" (down)"); }
+    if p.flags.iter().any(|f| f == "locked") { right.push_str(", locked"); }
+    else if p.flags.iter().any(|f| f == "kill switch") { right.push_str(", kill switch"); }
+    format!("{}	{right}", p.what)
+}
+
+/// Shows these pins as rows under the status line.
+fn set_rows(ui: &mut Ui, pins: &[Pin]) {
+    if ui.shown.as_deref() == Some(pins) { return; }
+    for r in ui.rows.drain(..) { let _ = ui.menu.remove(&r); }
+    let _ = ui.menu.remove(&ui.rows_sep);
+    for (i, p) in pins.iter().enumerate() {
+        let r = MenuItem::new(row_text(p), false, None);
+        let _ = ui.menu.insert(&r, 1 + i);
+        ui.rows.push(r);
+    }
+    if !pins.is_empty() { let _ = ui.menu.insert(&ui.rows_sep, 1 + pins.len()); }
+    ui.shown = Some(pins.to_vec());
 }
 
 /// Rebuilds the Internet submenu for these networks.
@@ -301,28 +330,23 @@ fn refresh(ui: &mut Ui, st: &mut State) {
     if st.key == Some((look, mtime)) { return; }
     st.key = Some((look, mtime));
     let _ = ui.tray.set_icon(Some(pin_icon(look)));
-    let (line, extra, tip) = match (&status, look) {
+    let (line, tip) = match (&status, look) {
         (_, Look::Pending) => {
             let t = st.pending.as_ref().map_or("", |p| p.text.as_str());
-            (t.to_owned(), String::new(), format!("net-pin: {t}"))
+            (t.to_owned(), format!("net-pin: {t}"))
         }
-        (_, Look::Missing) if !running => (
-            "Service not running".to_owned(),
-            "Start it: net-pin service start (admin)".to_owned(),
-            "net-pin: service not running".to_owned(),
-        ),
-        (None, _) => ("No status yet".to_owned(), String::new(), "net-pin".to_owned()),
+        (_, Look::Missing) if !running => ("Service not running".to_owned(), "net-pin: service not running".to_owned()),
+        (None, _) => ("No status yet".to_owned(), "net-pin".to_owned()),
         (Some(s), _) => {
-            let extra = match s.problems.len() {
-                0 | 1 => format!("Checked {}", short_time(&s.time)),
-                n => format!("+{} more problem(s), checked {}", n - 1, short_time(&s.time)),
-            };
-            (clip(&s.summary, 70), extra, clip(&format!("net-pin: {}", s.summary), 120))
+            let more = if s.problems.len() > 1 { format!(" (+{} more)", s.problems.len() - 1) } else { String::new() };
+            (clip(&format!("{}{more}", s.summary), 70), clip(&format!("net-pin: {}
+Checked {}", s.summary, short_time(&s.time)), 120))
         }
     };
     ui.status.set_text(line);
-    ui.detail.set_text(extra);
     let _ = ui.tray.set_tooltip(Some(tip));
+    let pins = status.as_ref().filter(|_| running).map(|s| s.pins.clone()).unwrap_or_default();
+    set_rows(ui, &pins);
     if let Some(s) = &status {
         let have: Vec<String> = ui.choices.iter().filter_map(|(n, _)| n.clone()).collect();
         if !s.networks.is_empty() && have != s.networks { set_choices(ui, &s.networks); }
@@ -425,6 +449,14 @@ mod tests {
         assert_eq!((s.internet.as_deref(), s.networks.len(), s.problems.len(), s.enabled), (Some("wifi"), 2, 1, true));
         let d: Status = serde_json::from_str(r#"{"internet":null}"#).unwrap();
         assert_eq!(d.internet, None);
+    }
+
+    #[test]
+    fn rows_put_the_network_on_the_right() {
+        let p = Pin { what: "Tailscale".into(), network: "wifi".into(), up: false, flags: vec!["kill switch".into(), "locked".into()] };
+        assert_eq!(row_text(&p), "Tailscale	wifi (down), locked");
+        let i = Pin { what: "Internet".into(), network: "lan".into(), up: true, flags: vec![] };
+        assert_eq!(row_text(&i), "Internet	lan");
     }
 
     #[test]

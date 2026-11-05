@@ -142,7 +142,8 @@ impl Config {
 
 /// Presets: ready-made setups the `net-pin preset` command applies on top of a config.
 pub const PRESETS: [(&str, &str); 1] = [
-    ("tailscale-wifi", "Tailscale only on Wi-Fi (locked kill switch), general internet on the LAN, Wi-Fi kept beside Ethernet"),
+    ("tailscale-wifi", "For a PC on a wired network that Tailscale must never use: Tailscale only on Wi-Fi
+                     (locked kill switch), general internet on the LAN, Wi-Fi kept up beside Ethernet"),
 ];
 
 pub fn preset(name: &str, cfg: &mut Config) -> Result<(), String> {
@@ -461,25 +462,46 @@ pub fn record(state: &State, snap: &Snapshot, actions: &[Action], policy_key_exi
     s
 }
 
-/// One line for the tray / status: where things go now.
+/// One thing pinned to a network, for the tray and `net-pin status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pin {
+    /// "Internet", a VPN's name, or a route's prefix.
+    pub what: String,
+    pub network: String,
+    /// The network has an adapter up.
+    pub up: bool,
+    /// "kill switch", "locked", "server".
+    #[serde(default)]
+    pub flags: Vec<String>,
+}
+
+/// What is pinned now. While routing is off, only locked VPNs (their kill switches stay on).
+pub fn pins(cfg: &Config, snap: &Snapshot) -> Vec<Pin> {
+    let pin = |what: &str, net: &str, flags: Vec<String>| Pin { what: what.into(), network: net.into(), up: snap.is_up(cfg, net), flags };
+    let mut out = Vec::new();
+    if cfg.enabled && !cfg.internet.is_empty() { out.push(pin("Internet", &cfg.internet, vec![])); }
+    for v in cfg.vpns.iter().filter(|v| cfg.enabled || (v.locked && v.kill_switch)) {
+        let mut f = Vec::new();
+        if v.kind == VpnKind::Server { f.push("server".to_string()); }
+        if v.kill_switch { f.push("kill switch".into()); }
+        if v.locked { f.push("locked".into()); }
+        out.push(pin(&v.name, &v.via, f));
+    }
+    if cfg.enabled { for r in &cfg.routes { out.push(pin(&r.prefix, &r.via, vec![])); } }
+    out
+}
+
+/// One short line for the tray and the log; the details are in `pins`.
 pub fn summary(cfg: &Config, snap: &Snapshot, p: &Plan) -> String {
-    let locked: Vec<String> = cfg.vpns.iter().filter(|v| v.locked && v.kill_switch).map(|v| format!("{} held to {}", v.name, v.via)).collect();
+    let pins = pins(cfg, snap);
     if !cfg.enabled {
-        return if locked.is_empty() { "Off: Windows default routing".into() } else { format!("Off: Windows default routing; {}", locked.join(", ")) };
+        return if pins.is_empty() { "Off".into() } else { format!("Off; {} locked kill switch(es) still on", pins.len()) };
     }
     if let Some(x) = p.problems.first() { return x.clone(); }
-    let net = match p.internet.as_deref() {
-        None => "internet: Windows decides".to_string(),
-        Some(n) if snap.is_up(cfg, n) => format!("internet via {n}"),
-        Some(n) => format!("internet: {n} is down, Windows decides"),
-    };
-    let mut parts = vec![net];
-    parts.extend(cfg.vpns.iter().map(|v| format!("{} via {}", v.name, v.via)));
-    if !cfg.vpns.is_empty() {
-        let egress = snap.default_egress(cfg).map_or("none".to_string(), |a| a.alias.clone());
-        parts.push(format!("VPN egress now: {egress}"));
-    }
-    parts.join("; ")
+    if pins.is_empty() { return "Nothing pinned".into(); }
+    let mut down: Vec<&str> = pins.iter().filter(|p| !p.up).map(|p| p.network.as_str()).collect();
+    down.dedup();
+    if down.is_empty() { format!("{} pinned, all up", pins.len()) } else { format!("{} pinned; {} down", pins.len(), down.join(", ")) }
 }
 
 #[cfg(test)]
@@ -668,6 +690,20 @@ mod tests {
         gone.adapters.retain(|a| a.alias != "Wi-Fi");
         gone.rules.truncate(2);
         assert!(!plan(&tailscale(), &gone, &State::default()).actions.iter().any(|a| matches!(a, Action::RemoveRule { .. })));
+    }
+
+    #[test]
+    fn pins_list_what_goes_where() {
+        let mut cfg = tailscale();
+        cfg.routes.push(RouteRule { prefix: "10.0.0.0/8".into(), via: "lan".into() });
+        let p = pins(&cfg, &both_up());
+        let rows: Vec<(String, String, bool)> = p.iter().map(|p| (p.what.clone(), p.network.clone(), p.up)).collect();
+        assert_eq!(rows, [("Internet".into(), "lan".into(), true), ("Tailscale".into(), "wifi".into(), true), ("10.0.0.0/8".into(), "lan".into(), true)]);
+        assert_eq!(p[1].flags, ["kill switch", "locked"]);
+        assert_eq!(summary(&cfg, &both_up(), &Plan::default()), "3 pinned, all up");
+        cfg.enabled = false;
+        assert_eq!(pins(&cfg, &both_up()).len(), 1, "only the locked VPN while off");
+        assert_eq!(summary(&Config::default(), &both_up(), &Plan::default()), "Nothing pinned");
     }
 
     #[test]

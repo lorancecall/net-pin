@@ -27,27 +27,37 @@ A fresh install changes nothing until you configure it.
 ## Quick start
 
 ```powershell
-net-pin status                      # adapters, networks, routes, what would change
+net-pin status                      # what is pinned where (--all for adapters and routes)
 net-pin internet lan                # general internet over Ethernet
 net-pin route add 10.0.0.0/8 via lan
-net-pin preset tailscale-wifi       # Tailscale only on Wi-Fi (locked), internet on LAN
+net-pin vpn add WireGuard exe="C:\Program Files\WireGuard\wireguard.exe" adapter="WireGuard Tunnel*" via=wifi kill-switch=on
 ```
 
 ## Examples
 
 | Goal | Command |
 |---|---|
-| Keep Tailscale off the wired network | `net-pin preset tailscale-wifi` |
 | Internet over Wi-Fi, internal ranges over LAN | `net-pin internet wifi` + `net-pin route add 10.0.0.0/8 via lan` |
 | Game servers over Ethernet | `net-pin route add <server range> via lan` |
 | A VPN only on Wi-Fi, never elsewhere | `net-pin vpn add WireGuard exe=<path> adapter="WireGuard Tunnel*" via=wifi kill-switch=on` |
 | Use USB tethering as a network | `net-pin network add phone kind=ethernet description="Remote NDIS*"` |
 | Pause everything | `net-pin off` (`net-pin on` to resume) |
 
+## Presets
+
+Ready-made setups for common cases. `net-pin preset` lists them; `net-pin preset <name>` applies one.
+
+| Preset | For |
+|---|---|
+| `tailscale-wifi` | A PC on a wired network that Tailscale must never use (work or lab LAN): Tailscale only on Wi-Fi with a locked kill switch, general internet on the LAN |
+
+A **locked** VPN keeps its kill switch even when routing is off, and only an administrator editing
+`config.toml` can change it.
+
 ## Commands
 
 ```text
-net-pin status | plan | apply | on | off
+net-pin status [--all] | plan | apply | on | off
 net-pin internet <network> | default
 net-pin network [add <name> kind=wireless|ethernet|cellular|any [alias=..] [description=..] | remove <name>]
 net-pin vpn [add <name> exe=.. [adapter=..] [via=..] [kill-switch=on|off] [kind=default-route|server] [servers=..]]

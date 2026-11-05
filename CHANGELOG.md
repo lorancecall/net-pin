@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Status shows what is pinned where as a list: one row per pin in the tray menu, a table in
+  `net-pin status` (`--all` adds adapters, routes and firewall rules).
+- Setup no longer asks about Tailscale; `net-pin preset` explains the ready-made setups.
+
 ## 0.3.1
 
 - Removed the coexistence check with another network tool and the `netpin.ps1` file it relied on.

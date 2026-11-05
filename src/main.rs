@@ -7,7 +7,7 @@ use net_pin::service::{self, Request};
 const HELP: &str = "net-pin - choose which network (Wi-Fi, wired LAN, tethering, ...) carries what on Windows
 
 USAGE (* = admin console)
-  net-pin status                 adapters and their networks, routes, rules, pending changes
+  net-pin status [--all]         what is pinned where; --all: adapters, routes, firewall rules
   net-pin plan                   only what apply would change
   net-pin apply                  re-apply now
   net-pin on | off               off: metrics restored, routes removed, kill switches disabled
@@ -51,17 +51,40 @@ fn on_off(s: Option<&String>) -> Result<bool> {
     match s.map(String::as_str) { Some("on") => Ok(true), Some("off") => Ok(false), _ => bail!("expected on or off") }
 }
 
-fn print_status(full: bool) -> Result<()> {
+fn print_pins(pins: &[model::Pin], level: &str, summary: &str) {
+    if pins.is_empty() {
+        println!("Nothing pinned: Windows decides. See `net-pin help` or `net-pin preset`.");
+    } else {
+        let w = pins.iter().map(|p| p.what.chars().count()).max().unwrap_or(0).max(6);
+        let n = pins.iter().map(|p| p.network.chars().count()).max().unwrap_or(0).max(7);
+        println!("{:<w$}  {:<n$}  STATE", "PINNED", "NETWORK");
+        for p in pins {
+            println!("{}", format!("{:<w$}  {:<n$}  {:<5} {}", p.what, p.network, if p.up { "up" } else { "down" }, p.flags.join(", ")).trim_end());
+        }
+    }
+    if !pins.is_empty() || level != "ok" { println!("
+{}: {summary}", level.to_uppercase()); }
+}
+
+/// `all`: also adapters, default routes and firewall rules.
+fn print_status(full: bool, all: bool) -> Result<()> {
     let r = net_pin::report()?;
     let (cfg, snap, plan) = (&r.cfg, &r.snap, &r.plan);
     if full {
-        println!("net-pin {}; service: {}", net_pin::VERSION,
-            if net_pin::svc::running() { "running" } else if net_pin::svc::exists() { "stopped" } else { "not installed" });
+        println!("net-pin {} | service {} | routing {}
+", net_pin::VERSION,
+            if net_pin::svc::running() { "running" } else if net_pin::svc::exists() { "stopped" } else { "not installed" },
+            if cfg.enabled { "on" } else { "off" });
+        print_pins(&model::pins(cfg, snap), net_pin::level(&r), &net_pin::summary(&r));
+    }
+    if all {
         let src = if net_pin::config_path().exists() { net_pin::config_path().display().to_string() } else { "defaults (no config.toml)".into() };
-        println!("config: {src}; routing {}", if cfg.enabled { "on" } else { "off" });
+        println!("
+config: {src}");
         let pol = match snap.policy { Some(0) => "0 (every connection stays up)".to_string(), Some(v) => format!("{v} (Windows may drop Wi-Fi)"), None => "not set (Windows drops Wi-Fi when Ethernet is up)".into() };
         println!("policy fMinimizeConnections: {pol}");
-        println!("\nadapters:");
+        println!("
+adapters:");
         let role = |a: &model::Adapter| match snap.network_of(cfg, a) {
             Some(n) => n.name.clone(),
             None if cfg.vpns.iter().any(|v| !v.adapter.is_empty() && model::glob(&v.adapter, &a.description)) => "(vpn)".into(),
@@ -72,30 +95,34 @@ fn print_status(full: bool) -> Result<()> {
             println!("  {:<8} {:<30} {:<5} metric {:<3}{:<5} gw {:<15} {}", role(a), a.alias, if a.up { "up" } else { "down" },
                 a.metric, if a.auto_metric { " auto" } else { "" }, gw, a.description);
         }
-        println!("\ndefault routes (route + interface metric):");
+        println!("
+default routes (route + interface metric):");
         let mut defs: Vec<(u32, &model::Route, &model::Adapter)> = snap.routes.iter().filter(|x| x.len == 0)
             .filter_map(|x| snap.adapters.iter().find(|a| a.index == x.index).map(|a| (x.metric + a.metric, x, a))).collect();
         defs.sort_by_key(|d| d.0);
         for (m, x, a) in defs { println!("  {m:<4} {:<30} via {}", a.alias, x.next_hop); }
         let ours: Vec<String> = snap.routes.iter().filter(|x| r.state.routes.contains(x)).map(|x| x.to_string()).collect();
-        println!("net-pin's routes: {}", if ours.is_empty() { "none".into() } else { ours.join("; ") });
+        println!("net-pin's routes:{}", if ours.is_empty() { " none".into() } else { ours.iter().map(|o| format!("
+  {o}")).collect::<String>() });
         for rule in &snap.rules {
             println!("firewall {}: {} on {}", rule.name, if rule.enabled { "block" } else { "disabled" }, rule.aliases.join(", "));
         }
-        let s = |s: &Option<String>| s.clone().unwrap_or_else(|| "Windows decides".into());
-        println!("\nVPN network (lowest metric): {}; general internet: {}", s(&plan.follow), s(&plan.internet));
-        println!("=> {}: {}", net_pin::level(&r).to_uppercase(), net_pin::summary(&r));
+        if !cfg.vpns.is_empty() {
+            println!("VPN egress now: {}", snap.default_egress(cfg).map_or("none".to_string(), |a| a.alias.clone()));
+        }
     }
+    if !plan.problems.is_empty() || !plan.notes.is_empty() || !plan.actions.is_empty() { println!(); }
     for p in &plan.problems { println!("! {p}"); }
     for n in &plan.notes { println!("  note: {n}"); }
-    if plan.actions.is_empty() { println!("apply would change nothing"); }
-    else { println!("apply would:"); for a in &plan.actions { println!("  {a}"); } }
+    if !plan.actions.is_empty() { println!("apply would:"); for a in &plan.actions { println!("  {a}"); } }
+    else if !full { println!("apply would change nothing"); }
     Ok(())
 }
 
 fn print_reply(r: &service::Reply) {
-    println!("{}", r.message);
-    println!("=> {}: {}", r.level.to_uppercase(), r.summary);
+    println!("{}
+", r.message);
+    print_pins(&r.pins, &r.level, &r.summary);
     for p in &r.problems { println!("! {p}"); }
     for p in &r.pending { println!("  pending: {p}"); }
 }
@@ -124,7 +151,7 @@ fn request(req: Request) -> Result<()> {
     }
     let (ok, bad) = net_pin::reconcile()?;
     println!("{ok} change(s) made, {bad} failed (log: {})", net_pin::log_path().display());
-    print_status(false)
+    print_status(false, false)
 }
 
 /// Changes the config through `request`.
@@ -280,7 +307,13 @@ fn route(args: &[String]) -> Result<()> {
 
 fn preset(args: &[String]) -> Result<()> {
     match args.first() {
-        None => { for (n, d) in model::PRESETS { println!("{n:<16} {d}"); } Ok(()) }
+        None => {
+            println!("Presets: ready-made setups for common cases. Apply one with `net-pin preset <name>`;");
+            println!("it changes your config the same way the individual commands would.
+");
+            for (n, d) in model::PRESETS { println!("  {n:<16} {d}"); }
+            Ok(())
+        }
         Some(name) => {
             let name = name.clone();
             edit(|c| model::preset(&name, c).map_err(|e| anyhow::anyhow!(e)))
@@ -336,8 +369,8 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
-        None | Some("status") => print_status(true),
-        Some("plan") => print_status(false),
+        None | Some("status") => print_status(true, rest.first().is_some_and(|a| a == "--all" || a == "-a")),
+        Some("plan") => print_status(false, false),
         Some("apply") => request(Request::Apply),
         Some("on") => request(Request::SetEnabled { enabled: true }),
         Some("off") => request(Request::SetEnabled { enabled: false }),

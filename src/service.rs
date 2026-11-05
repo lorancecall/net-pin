@@ -138,6 +138,7 @@ pub struct Reply {
     pub config: Option<Config>,
     pub level: String,
     pub summary: String,
+    pub pins: Vec<crate::model::Pin>,
     pub internet: Option<String>,
     pub follow: Option<String>,
     pub networks: Vec<String>,
@@ -152,6 +153,7 @@ fn status(ok: bool, message: impl Into<String>) -> Reply {
         Ok(rep) => {
             r.level = crate::level(&rep).into();
             r.summary = crate::summary(&rep);
+            r.pins = crate::model::pins(&rep.cfg, &rep.snap);
             r.internet = rep.plan.internet;
             r.follow = rep.plan.follow;
             r.pending = rep.plan.actions.iter().map(|a| a.to_string()).collect();
