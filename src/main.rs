@@ -21,9 +21,13 @@ USAGE (* = admin console)
   net-pin vpn                    list VPNs
   net-pin vpn <name> via <network>
   net-pin vpn <name> kill-switch on|off
-  net-pin vpn add <name> exe=<path> [adapter=<description>] [via=<network>] [kill-switch=on|off]
-                     [kind=default-route|server] [servers=a.b.c.d,...]
+  net-pin vpn add <name> exe=<path> [programs=<path>;<path>] [adapter=<description>,...] [via=<network>]
+                     [kill-switch=on|off] [kind=default-route|server] [servers=a.b.c.d,...]
+                     [ports=udp:51820,tcp:1194]   (programs: * stands for a version folder)
+  net-pin vpn <name> set <key>=<value> ...   change any of the keys above (programs, ports and
+                                 servers replace the list; an empty value clears it)
   net-pin vpn remove <name>
+  net-pin programs [filter]      running programs and their paths (for exe= / programs=)
   net-pin route                  list destination routes
   net-pin route add <a.b.c.d/n> via <network>
   net-pin route remove <a.b.c.d/n>
@@ -87,7 +91,7 @@ config: {src}");
 adapters:");
         let role = |a: &model::Adapter| match snap.network_of(cfg, a) {
             Some(n) => n.name.clone(),
-            None if cfg.vpns.iter().any(|v| !v.adapter.is_empty() && model::glob(&v.adapter, &a.description)) => "(vpn)".into(),
+            None if cfg.vpns.iter().any(|v| v.is_tunnel(a)) => "(vpn)".into(),
             None => String::new(),
         };
         for a in &snap.adapters {
@@ -167,6 +171,37 @@ fn find<'a>(cfg: &'a mut Config, name: &str) -> Result<&'a mut Vpn> {
     cfg.vpns.iter_mut().find(|v| v.name.eq_ignore_ascii_case(name)).ok_or_else(|| anyhow::anyhow!("no VPN named {name:?}; see `net-pin vpn`"))
 }
 
+/// Applies `key=value` arguments of `vpn add` / `vpn set` to `v`; returns the `via` network asked for.
+fn vpn_keys(v: &mut Vpn, kvs: &[String]) -> Result<Option<String>> {
+    let mut via = None;
+    for kv in kvs {
+        let Some((k, val)) = kv.split_once('=') else { bail!("expected key=value, got {kv}") };
+        match k {
+            "exe" => { let mut p = v.all_programs(); if p.is_empty() { p.push(val.into()) } else { p[0] = val.into() } v.set_programs(p.into_iter().filter(|x| !x.is_empty()).collect()); }
+            "programs" => { let p: Vec<String> = val.split(';').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect(); v.set_programs(p); }
+            "adapter" => v.adapter = val.into(),
+            "via" => via = Some(val.to_string()),
+            "kill-switch" => v.kill_switch = on_off(Some(&val.to_string()))?,
+            "kind" => v.kind = match val { "server" => VpnKind::Server, "default-route" => VpnKind::DefaultRoute, _ => bail!("kind is default-route or server") },
+            "servers" => v.servers = list(&[val.to_string()]),
+            "ports" => v.ports = list(&[val.to_string()]),
+            _ => bail!("unknown key {k}"),
+        }
+    }
+    anyhow::ensure!(!v.kill_switch || !v.all_programs().is_empty() || !v.ports.is_empty(), "a kill switch needs exe=<path>, programs= or ports=");
+    for s in &v.servers { anyhow::ensure!(model::parse_prefix(s).is_some(), "bad server address {s}"); }
+    for s in &v.ports { anyhow::ensure!(model::parse_ports(s).is_some(), "bad port entry {s:?} (e.g. udp 51820)"); }
+    Ok(via)
+}
+
+fn programs(args: &[String]) -> Result<()> {
+    let f = args.first().map(|s| s.to_lowercase()).unwrap_or_default();
+    for (name, path) in net_pin::running_programs().into_iter().filter(|(n, p)| n.to_lowercase().contains(&f) || p.to_lowercase().contains(&f)) {
+        println!("{name:<32} {path}");
+    }
+    Ok(())
+}
+
 fn list(items: &[String]) -> Vec<String> { items.iter().flat_map(|s| s.split(',')).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() }
 
 fn networks(args: &[String]) -> Result<()> {
@@ -222,33 +257,32 @@ fn vpn(args: &[String]) -> Result<()> {
             let cfg = net_pin::load_config()?;
             for v in &cfg.vpns {
                 let kind = if v.kind == VpnKind::Server { format!(" servers {}", v.servers.join(",")) } else { String::new() };
-                println!("{:<14} via {:<8} kill switch {:<3}{} exe {} adapter {:?}{kind}", v.name, v.via,
-                    if v.kill_switch { "on" } else { "off" }, if v.locked { " [locked]" } else { "" }, v.exe, v.adapter);
+                println!("{:<14} via {:<8} kill switch {:<3}{} adapter {:?}{kind}", v.name, v.via,
+                    if v.kill_switch { "on" } else { "off" }, if v.locked { " [locked]" } else { "" }, v.adapter);
+                for p in v.all_programs() { println!("{:<14} program {p}", ""); }
+                if !v.ports.is_empty() { println!("{:<14} ports {}", "", v.ports.join(", ")); }
             }
             if cfg.vpns.is_empty() { println!("no VPNs; add one with `net-pin vpn add` or a preset (`net-pin preset`)"); }
             Ok(())
         }
         (Some("add"), Some(name)) => {
             let mut v = Vpn { name: name.into(), ..Default::default() };
-            let mut via = None;
-            for kv in &args[2..] {
-                let Some((k, val)) = kv.split_once('=') else { bail!("expected key=value, got {kv}") };
-                match k {
-                    "exe" => v.exe = val.into(),
-                    "adapter" => v.adapter = val.into(),
-                    "via" => via = Some(val.to_string()),
-                    "kill-switch" => v.kill_switch = on_off(Some(&val.to_string()))?,
-                    "kind" => v.kind = match val { "server" => VpnKind::Server, "default-route" => VpnKind::DefaultRoute, _ => bail!("kind is default-route or server") },
-                    "servers" => v.servers = list(&[val.to_string()]),
-                    _ => bail!("unknown key {k}"),
-                }
-            }
-            anyhow::ensure!(!v.exe.is_empty() || !v.kill_switch, "a kill switch needs exe=<path>");
-            for s in &v.servers { anyhow::ensure!(model::parse_prefix(s).is_some(), "bad server address {s}"); }
+            let via = vpn_keys(&mut v, &args[2..])?;
             edit(|c| {
                 anyhow::ensure!(!c.vpns.iter().any(|x| x.name.eq_ignore_ascii_case(&v.name)), "{} exists; remove it first", v.name);
                 if let Some(n) = via { v.via = network(c, Some(&n))?; }
                 c.vpns.push(v);
+                Ok(())
+            })
+        }
+        (Some(name), Some("set")) => {
+            let kvs = args[2..].to_vec();
+            anyhow::ensure!(!kvs.is_empty(), "usage: net-pin vpn <name> set <key>=<value> ...");
+            edit(|c| {
+                let mut v = find(c, name)?.clone();
+                let via = vpn_keys(&mut v, &kvs)?;
+                if let Some(n) = via { v.via = network(c, Some(&n))?; }
+                *find(c, name)? = v;
                 Ok(())
             })
         }
@@ -265,7 +299,7 @@ fn vpn(args: &[String]) -> Result<()> {
             let on = on_off(args.get(2))?;
             edit(|c| {
                 let v = find(c, name)?;
-                anyhow::ensure!(!on || !v.exe.is_empty(), "{} has no exe to block", v.name);
+                anyhow::ensure!(!on || !v.all_programs().is_empty() || !v.ports.is_empty(), "{} has no program or port to block", v.name);
                 v.kill_switch = on;
                 Ok(())
             })
@@ -377,6 +411,7 @@ fn main() -> Result<()> {
         Some("internet") => internet(rest),
         Some("network" | "networks") => networks(rest),
         Some("vpn") => vpn(rest),
+        Some("programs") => programs(rest),
         Some("route") => route(rest),
         Some("preset") => preset(rest),
         Some("set") => set(rest),

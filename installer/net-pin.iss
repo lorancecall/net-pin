@@ -1,5 +1,5 @@
 ; Inno Setup script - build with .\build.ps1 (cargo build --release, tests, then ISCC.exe installer\net-pin.iss)
-#define AppVersion "0.3.2"
+#define AppVersion "0.3.3"
 
 [Setup]
 AppId={{5E0B8C51-7A2E-4B8F-9C3D-6F1A2B4E8D70}

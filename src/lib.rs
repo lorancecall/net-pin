@@ -82,13 +82,129 @@ pub struct Report {
     pub plan: Plan,
 }
 
-/// Reads everything and plans (no admin needed).
+/// Reads everything and plans (no admin needed). Programs with `*` are planned as the files they
+/// match now (a VPN's version folder changes with its updates); `cfg` keeps the patterns.
 pub fn report() -> Result<Report> {
     let cfg = load_config()?;
     let snap = sys::snapshot()?;
     let state = load_state();
-    let plan = model::plan(&cfg, &snap, &state);
+    let (expanded, missing) = expand_programs(&cfg);
+    let mut plan = model::plan(&expanded, &snap, &state);
+    plan.notes.extend(missing.into_iter().map(|m| format!("no program matches {m}")));
     Ok(Report { cfg, snap, state, plan })
+}
+
+/// The config with each VPN's `*` programs replaced by the files they match, and the patterns
+/// that match nothing.
+pub fn expand_programs(cfg: &model::Config) -> (model::Config, Vec<String>) {
+    let mut out = cfg.clone();
+    let mut missing = Vec::new();
+    for v in &mut out.vpns {
+        let mut list = Vec::new();
+        for p in v.all_programs() {
+            if !p.contains('*') { list.push(p); continue; }
+            let found = expand_path(&p);
+            if found.is_empty() { missing.push(p); }
+            list.extend(found);
+        }
+        v.set_programs(list);
+    }
+    (out, missing)
+}
+
+/// Files matching `pat`, where `*` matches within one path component.
+fn expand_path(pat: &str) -> Vec<String> {
+    let parts: Vec<&str> = pat.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    let Some((first, rest)) = parts.split_first() else { return Vec::new() };
+    let mut at = vec![std::path::PathBuf::from(format!("{first}\\"))];
+    for part in rest {
+        let mut next = Vec::new();
+        for dir in &at {
+            if !part.contains('*') { next.push(dir.join(part)); continue; }
+            let Ok(rd) = std::fs::read_dir(dir) else { continue };
+            for e in rd.flatten() {
+                if model::glob(part, &e.file_name().to_string_lossy()) { next.push(e.path()); }
+            }
+        }
+        at = next;
+    }
+    let mut v: Vec<String> = at.into_iter().filter(|p| p.is_file()).map(|p| p.display().to_string()).collect();
+    v.sort();
+    v
+}
+
+/// Running programs with a path, once each, by file name: (name, path).
+pub fn running_programs() -> Vec<(String, String)> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    use windows::Win32::System::Threading::*;
+    let mut out: Vec<(String, String)> = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snap, &mut e).is_ok();
+        let map = device_map();
+        while more {
+            let pid = e.th32ProcessID;
+            let mut path = None;
+            if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut buf = [0u16; 1024];
+                let mut n = buf.len() as u32;
+                if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok() {
+                    path = Some(String::from_utf16_lossy(&buf[..n as usize]));
+                }
+                let _ = CloseHandle(h);
+            }
+            // Services a user may not open (a VPN's own service, often) still have a kernel image name.
+            if path.is_none() && pid > 4 { path = nt_image_path(pid).map(|p| nt_to_dos(&p, &map)); }
+            if let Some(path) = path && !out.iter().any(|x| x.1.eq_ignore_ascii_case(&path)) {
+                let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
+                out.push((name, path));
+            }
+            more = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out.sort_by_key(|x| x.0.to_lowercase());
+    out
+}
+
+/// A process's image as an NT path (`\Device\HarddiskVolumeN\...`), without opening it.
+fn nt_image_path(pid: u32) -> Option<String> {
+    use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
+    use windows::Win32::Foundation::UNICODE_STRING;
+    #[repr(C)]
+    struct IdInfo { pid: usize, name: UNICODE_STRING }
+    let mut buf = vec![0u16; 1024];
+    let mut info = IdInfo { pid: pid as usize, name: UNICODE_STRING { Length: 0, MaximumLength: (buf.len() * 2) as u16, Buffer: windows::core::PWSTR(buf.as_mut_ptr()) } };
+    // 88 = SystemProcessIdInformation
+    let st = unsafe { NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS(88), (&mut info as *mut IdInfo).cast(), size_of::<IdInfo>() as u32, std::ptr::null_mut()) };
+    if st.0 < 0 { return None; }
+    let s = String::from_utf16_lossy(&buf[..info.name.Length as usize / 2]);
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// `\Device\HarddiskVolumeN` -> `C:` for every mounted drive letter.
+fn device_map() -> Vec<(String, String)> {
+    use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
+    let mut v = Vec::new();
+    for l in b'A'..=b'Z' {
+        let drive = format!("{}:", l as char);
+        let mut buf = [0u16; 512];
+        let n = unsafe { QueryDosDeviceW(&windows::core::HSTRING::from(drive.as_str()), Some(&mut buf)) };
+        if n > 0 {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            v.push((String::from_utf16_lossy(&buf[..end]), drive));
+        }
+    }
+    v
+}
+
+fn nt_to_dos(nt: &str, map: &[(String, String)]) -> String {
+    for (dev, drive) in map {
+        if let Some(rest) = nt.strip_prefix(dev.as_str()) && rest.starts_with('\\') { return format!("{drive}{rest}"); }
+    }
+    nt.to_string()
 }
 
 /// Brings the system to the config (admin): records originals first, then runs each action;

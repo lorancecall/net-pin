@@ -50,6 +50,7 @@ Ready-made setups for common cases. `net-pin preset` lists them; `net-pin preset
 | Preset | For |
 |---|---|
 | `tailscale-wifi` | A PC on a wired network that Tailscale must never use (work or lab LAN): Tailscale only on Wi-Fi with a locked kill switch, general internet on the LAN |
+| `nordvpn-wifi` | NordVPN only on Wi-Fi with its kill switch: its service programs and NordLynx's `udp 51820` are blocked on every other network, and its server route moves to Wi-Fi |
 
 A **locked** VPN keeps its kill switch even when routing is off, and only an administrator editing
 `config.toml` can change it.
@@ -60,15 +61,20 @@ A **locked** VPN keeps its kill switch even when routing is off, and only an adm
 net-pin status [--all] | plan | apply | on | off
 net-pin internet <network> | default
 net-pin network [add <name> kind=wireless|ethernet|cellular|any [alias=..] [description=..] | remove <name>]
-net-pin vpn [add <name> exe=.. [adapter=..] [via=..] [kill-switch=on|off] [kind=default-route|server] [servers=..]]
-net-pin vpn <name> via <network> | kill-switch on|off | remove
+net-pin vpn [add <name> exe=.. [programs=..;..] [adapter=..,..] [via=..] [kill-switch=on|off] [kind=default-route|server] [servers=..] [ports=udp:51820,..]]
+net-pin vpn <name> via <network> | kill-switch on|off | set <key>=<value> .. | remove
+net-pin programs [filter]
 net-pin route [add <a.b.c.d/n> via <network> | remove <a.b.c.d/n>]
 net-pin preset [<name>]
 net-pin set keep-connected on|off | top-metric 1-4
 net-pin config | log [n] | undo | service install|uninstall|start|stop | help
 ```
 
-Names and descriptions accept `*` wildcards. Settings are stored in `C:\ProgramData\net-pin\config.toml`.
+Names and descriptions accept `*` wildcards; in `programs`, `*` stands for a folder that changes
+with updates (`C:\Program Files\NordVPN\*\nordvpn-service-app.exe`). A kill switch must name the
+programs that make the VPN's connection, often a service rather than the app you open
+(`net-pin programs` lists the running ones). Tunnels that run inside Windows (NordLynx, WireGuard)
+send from the kernel, not from a program: block their port (`ports=udp:51820`). Settings are stored in `C:\ProgramData\net-pin\config.toml`.
 
 ## How it works
 
@@ -77,7 +83,8 @@ Names and descriptions accept `*` wildcards. Settings are stored in `C:\ProgramD
 | VPN network | That network's adapters get the lowest interface metric |
 | Internet network | Its adapters get `0.0.0.0/1` + `128.0.0.0/1`, which beat the default route |
 | Routes | A route to the prefix via the network's gateway |
-| Kill switch | Windows Firewall blocks the VPN's program on every other adapter |
+| Kill switch | Windows Firewall blocks the VPN's programs on every other adapter, and its `ports` for every program |
+| Server VPN | Its `servers`, and the host route it adds to its server on another network while its tunnel is up, get a route via its network |
 | Keep both up | Sets the `fMinimizeConnections = 0` policy (takes effect after a reboot) |
 
 ## Limits
