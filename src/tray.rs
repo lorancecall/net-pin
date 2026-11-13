@@ -1,15 +1,19 @@
 #![windows_subsystem = "windows"]
 //! net-pin tray: shows where traffic goes, switches the internet network and routing on / off.
+//! With the optional memory feature on, it also lists the on-demand app families (switch one on /
+//! off now) and records memory samples and display / power events for `net-pin ram leaks`.
 //!
 //! The tray never touches the network itself (it runs un-elevated): it reads the `status.json` the
-//! service writes after every pass, and sends requests to the service over its pipe.
+//! service writes after every pass (and `service.toml` / `ondemand.json` for memory), and sends
+//! requests to the service over its pipe.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::SystemTime;
 
 use net_pin::model::Pin;
-use net_pin::service::{self, Reply, Request};
+use net_pin::ram;
+use net_pin::service::{self, Request};
 use serde::Deserialize;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -232,14 +236,30 @@ struct Ui {
     enabled: CheckMenuItem,
     apply: MenuItem,
     log: MenuItem,
+    mem: Memory,
     autostart: CheckMenuItem,
     quit: MenuItem,
+}
+
+/// The Memory submenu: the feature switch, one row per on-demand family (checked = on now), the
+/// leak report.
+struct Memory {
+    sub: Submenu,
+    on: CheckMenuItem,
+    sep: PredefinedMenuItem,
+    families: Vec<(String, CheckMenuItem)>,
+    leaks: MenuItem,
+    /// (feature on, ondemand.json modified) last shown.
+    key: Option<(bool, Option<SystemTime>)>,
+    /// The session's memory observer runs in this process (started once the feature is on).
+    observer: Option<ram::single::Instance>,
 }
 
 /// A request sent to the service, shown (blue) until its reply arrives.
 struct Pending {
     text: String,
-    reply: Receiver<Result<Reply, String>>,
+    /// (ok, message) from the service.
+    reply: Receiver<Result<(bool, String), String>>,
 }
 
 struct State {
@@ -253,6 +273,9 @@ fn build_ui() -> Ui {
     let enabled = CheckMenuItem::new("Routing on", true, true, None);
     let apply = MenuItem::new("Re-apply now", true, None);
     let log = MenuItem::new("Open log", true, None);
+    let mem = Memory { sub: Submenu::new("Memory", true), on: CheckMenuItem::new("Memory on", true, false, None),
+        sep: PredefinedMenuItem::separator(), families: Vec::new(), leaks: MenuItem::new("Leak report", true, None), key: None, observer: None };
+    let _ = mem.sub.append_items(&[&mem.on, &mem.sep, &mem.leaks]);
     let autostart = CheckMenuItem::new("Start with Windows", true, autostart_enabled(), None);
     let quit = MenuItem::new("Quit tray", true, None);
     let menu = Menu::new();
@@ -263,6 +286,7 @@ fn build_ui() -> Ui {
         &enabled,
         &apply,
         &log,
+        &mem.sub,
         &PredefinedMenuItem::separator(),
         &autostart,
         &quit,
@@ -275,7 +299,7 @@ fn build_ui() -> Ui {
         .build()
         .expect("tray icon");
     let mut ui = Ui { tray, menu, status, rows: Vec::new(), rows_sep: PredefinedMenuItem::separator(), shown: None,
-                      internet, choices: Vec::new(), enabled, apply, log, autostart, quit };
+                      internet, choices: Vec::new(), enabled, apply, log, mem, autostart, quit };
     set_choices(&mut ui, &["wifi".into(), "lan".into()]);
     ui
 }
@@ -314,15 +338,48 @@ fn set_choices(ui: &mut Ui, networks: &[String]) {
     }
 }
 
+fn ondemand_mtime() -> Option<SystemTime> {
+    std::fs::metadata(ram::daemon::state_path()).and_then(|m| m.modified()).ok()
+}
+
+/// The Memory submenu from `service.toml` and `ondemand.json` (both readable by users); starts
+/// the session's memory observer the first time the feature is on.
+fn refresh_memory(m: &mut Memory) {
+    let on = net_pin::memory::Features::load().memory;
+    let key = (on, ondemand_mtime());
+    if m.key == Some(key) { return; }
+    m.key = Some(key);
+    m.on.set_checked(on);
+    for (_, item) in m.families.drain(..) { let _ = m.sub.remove(&item); }
+    if on {
+        for (i, e) in ram::daemon::load().entries.iter().enumerate() {
+            let mode = if e.mode == ram::ondemand::Mode::Follow { "follows its app" } else { "kept off" };
+            let item = CheckMenuItem::new(format!("{}\t{mode}", clip(&e.family, 40)), true, e.on, None);
+            let _ = m.sub.insert(&item, 2 + i);
+            m.families.push((e.key.clone(), item));
+        }
+        if m.observer.is_none() {
+            // One observer per session, shared with the console `net-pin ram watch`.
+            if let Some(lock) = ram::single::acquire(ram::events::LOCK) {
+                match ram::events::start() {
+                    Ok(()) => m.observer = Some(lock),
+                    Err(e) => message(&format!("Memory samples could not start: {e:#}")),
+                }
+            }
+        }
+    }
+}
+
 fn refresh(ui: &mut Ui, st: &mut State) {
     if let Some(p) = &st.pending {
         match p.reply.try_recv() {
-            Ok(Ok(r)) if !r.ok => { st.pending = None; message(&r.message); }
+            Ok(Ok((false, m))) => { st.pending = None; message(&m); }
             Ok(Err(e)) => { st.pending = None; message(&e); }
             Ok(Ok(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => st.pending = None,
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
+    if st.pending.is_none() { refresh_memory(&mut ui.mem); }
     let running = net_pin::svc::running();
     let mtime = status_mtime();
     let status = read_status();
@@ -360,9 +417,14 @@ Checked {}", s.summary, short_time(&s.time)), 120))
 
 /// Sends `req` on a worker thread (a reconcile can take a few seconds).
 fn request(ui: &mut Ui, st: &mut State, req: Request, text: String) {
+    send(ui, st, text, move || service::call(&req).map(|r| (r.ok, r.message)));
+}
+
+/// Runs `call` (a request to the service) on a worker thread; its reply ends the pending state.
+fn send(ui: &mut Ui, st: &mut State, text: String, call: impl FnOnce() -> anyhow::Result<(bool, String)> + Send + 'static) {
     if st.pending.is_some() { st.key = None; refresh(ui, st); return; }
     let (tx, rx) = channel();
-    std::thread::spawn(move || { let _ = tx.send(service::call(&req).map_err(|e| format!("{e:#}"))); });
+    std::thread::spawn(move || { let _ = tx.send(call().map_err(|e| format!("{e:#}"))); });
     st.pending = Some(Pending { text, reply: rx });
     st.key = None;
     refresh(ui, st);
@@ -382,6 +444,23 @@ fn handle(ui: &mut Ui, st: &mut State, ev: MenuEvent) -> bool {
         request(ui, st, Request::SetEnabled { enabled: on }, text.into());
     } else if id == ui.apply.id() {
         request(ui, st, Request::Apply, "Re-applying\u{2026}".into());
+    } else if id == ui.mem.on.id() {
+        let on = ui.mem.on.is_checked(); // muda already toggled it
+        ui.mem.key = None;
+        let text = if on { "Turning memory on\u{2026}" } else { "Turning memory off\u{2026}" };
+        request(ui, st, Request::SetFeature { name: "memory".into(), on }, text.into());
+    } else if let Some((key, item)) = ui.mem.families.iter().find(|(_, item)| item.id() == &id) {
+        let (key, on) = (key.clone(), item.is_checked()); // muda already toggled it
+        ui.mem.key = None;
+        let text = format!("Switching {key} {}\u{2026}", if on { "on" } else { "off" });
+        send(ui, st, text, move || {
+            let r = ram::pipe::call_wait(&ram::ondemand::Request::Turn { key, on }, std::time::Duration::from_secs(30))?;
+            Ok((r.ok, r.message))
+        });
+    } else if id == ui.mem.leaks.id() {
+        // A console window with the report (it stays open to be read).
+        let exe = std::env::current_exe().map(|p| p.with_file_name("net-pin.exe")).unwrap_or_else(|_| "net-pin.exe".into());
+        let _ = std::process::Command::new("cmd.exe").arg("/k").arg(exe).args(["ram", "leaks"]).spawn();
     } else if id == ui.log.id() {
         let _ = std::process::Command::new("notepad.exe").arg(net_pin::log_path()).spawn();
     } else if id == ui.autostart.id() {

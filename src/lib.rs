@@ -4,11 +4,14 @@
 //!
 //! The engine is `model` (pure planner), `sys` and `fw`; `service` runs it on every network change. Files in `%ProgramData%\net-pin`
 //! (service / admin only): `config.toml`, `state.json` (values recorded before the first change),
-//! `status.json`, `net-pin.log`.
+//! `status.json`, `net-pin.log`; with the optional memory feature (`memory`, `ram`) also `service.toml`
+//! and `ondemand.json`.
 pub mod fw;
+pub mod memory;
 pub mod model;
 pub mod paths;
 pub mod pipe;
+pub mod ram;
 pub mod service;
 pub mod svc;
 pub mod sys;
@@ -30,6 +33,9 @@ const LOG_MAX: u64 = 1 << 20;
 pub fn log(msg: impl AsRef<str>) {
     if !paths::may_write_data_dir() { return; }
     use std::io::Write;
+    // Feature threads log at the same time; one line at a time.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let p = log_path();
     if std::fs::metadata(&p).is_ok_and(|m| m.len() > LOG_MAX) { let _ = std::fs::rename(&p, p.with_extension("log.1")); }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {

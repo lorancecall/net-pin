@@ -99,6 +99,7 @@ pub fn run(stop: &AtomicBool) -> Result<()> {
     crate::paths::create_data_dir()?;
     crate::log(format!("service {} started", crate::VERSION));
     crate::pipe::serve(handler());
+    let memory = crate::memory::spawn();
     let mut wait = Duration::from_secs(10);
     while !stop.load(Ordering::SeqCst) {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch(stop)));
@@ -108,6 +109,7 @@ pub fn run(stop: &AtomicBool) -> Result<()> {
         while Instant::now() < until && !stop.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(500)); }
         wait = (wait * 2).min(Duration::from_secs(600));
     }
+    crate::memory::stop(memory);
     crate::log("service stopped");
     Ok(())
 }
@@ -127,6 +129,8 @@ pub enum Request {
     SetEnabled { enabled: bool },
     /// Replace the whole config (the `net-pin` command's vpn / route / set changes).
     SetConfig { config: Config },
+    /// Switch an optional feature of the service (only `memory`).
+    SetFeature { name: String, on: bool },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -145,10 +149,12 @@ pub struct Reply {
     pub pending: Vec<String>,
     pub problems: Vec<String>,
     pub notes: Vec<String>,
+    /// The optional memory feature is on.
+    pub memory: bool,
 }
 
 fn status(ok: bool, message: impl Into<String>) -> Reply {
-    let mut r = Reply { ok, message: message.into(), version: crate::VERSION.into(), ..Default::default() };
+    let mut r = Reply { ok, message: message.into(), version: crate::VERSION.into(), memory: crate::memory::on(), ..Default::default() };
     match crate::report() {
         Ok(rep) => {
             r.level = crate::level(&rep).into();
@@ -201,12 +207,15 @@ fn answer(req: Request) -> Reply {
         Request::SetInternet { network } => change(|c| c.internet = network),
         Request::SetEnabled { enabled } => change(|c| c.enabled = enabled),
         Request::SetConfig { config } => change(|c| *c = config),
+        Request::SetFeature { name, on } if name == "memory" => crate::memory::set(on),
+        Request::SetFeature { name, .. } => Err(anyhow::anyhow!("no feature {name:?} (only memory)")),
     };
     match r { Ok(m) => status(true, m), Err(e) => status(false, format!("{e:#}")) }
 }
 
 pub fn handler() -> crate::pipe::Handler {
     Arc::new(|body: Value| {
+        if let Some(b) = crate::ram::pipe::body_of(&body) { return crate::ram::pipe::handle(&crate::memory::SLOT, b); }
         let r = match serde_json::from_value::<Request>(body) {
             Ok(req) => answer(req),
             Err(e) => Reply { message: format!("bad request: {e}"), ..Default::default() },

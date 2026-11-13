@@ -4,6 +4,8 @@ use anyhow::{Result, bail};
 use net_pin::model::{self, Config, Kind, Network, RouteRule, Vpn, VpnKind};
 use net_pin::service::{self, Request};
 
+mod ramcli;
+
 const HELP: &str = "net-pin - choose which network (Wi-Fi, wired LAN, tethering, ...) carries what on Windows
 
 USAGE (* = admin console)
@@ -35,6 +37,9 @@ USAGE (* = admin console)
   net-pin set keep-connected on|off | top-metric 1-4
   net-pin config                 print the config
   net-pin log [lines]            the end of the log
+  net-pin feature memory on|off  the optional memory feature (on-demand app families kept off,
+                                 memory samples and leaks): `net-pin ram help`
+  net-pin ram <command>          memory hogs, app families, cleanup scripts, leaks, on-demand
   net-pin undo                 * put everything back as recorded (stop the service first)
   net-pin service install|uninstall|start|stop     *  (the installer runs install / uninstall)
   net-pin daemon               * run the service in this console (NETPIN_DATA=<dir> to test)
@@ -75,10 +80,10 @@ fn print_status(full: bool, all: bool) -> Result<()> {
     let r = net_pin::report()?;
     let (cfg, snap, plan) = (&r.cfg, &r.snap, &r.plan);
     if full {
-        println!("net-pin {} | service {} | routing {}
+        println!("net-pin {} | service {} | routing {} | memory {}
 ", net_pin::VERSION,
             if net_pin::svc::running() { "running" } else if net_pin::svc::exists() { "stopped" } else { "not installed" },
-            if cfg.enabled { "on" } else { "off" });
+            if cfg.enabled { "on" } else { "off" }, if net_pin::memory::Features::load().memory { "on" } else { "off" });
         print_pins(&model::pins(cfg, snap), net_pin::level(&r), &net_pin::summary(&r));
     }
     if all {
@@ -147,6 +152,7 @@ fn request(req: Request) -> Result<()> {
         Request::SetInternet { network } => Some(Config { internet: network, ..cfg.clone() }),
         Request::SetEnabled { enabled } => Some(Config { enabled, ..cfg.clone() }),
         Request::SetConfig { config } => Some(config),
+        Request::SetFeature { .. } => bail!("the net-pin service is not running"),
     };
     if let Some(n) = new {
         service::check_config(&cfg, &n)?;
@@ -383,6 +389,24 @@ fn show_log(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `feature memory on|off`: through the service, or saved here (admin) for its next start.
+fn feature(args: &[String]) -> Result<()> {
+    let (Some("memory"), Ok(on)) = (args.first().map(String::as_str), on_off(args.get(1))) else { bail!("usage: net-pin feature memory on|off") };
+    if net_pin::svc::running() {
+        let r = service::call(&Request::SetFeature { name: "memory".into(), on })?;
+        println!("{}", r.message);
+        if !r.ok { bail!("not done"); }
+        return Ok(());
+    }
+    let mut f = net_pin::memory::Features::load();
+    f.memory = on;
+    f.save().map_err(|e| anyhow::anyhow!("{e:#}
+(the service is not running: start it, or run this in an admin console)"))?;
+    if !on { for l in net_pin::ram::daemon::release_all() { println!("{l}"); } }
+    println!("memory {} (saved {}; used when the service starts)", if on { "on" } else { "off" }, net_pin::memory::Features::path().display());
+    Ok(())
+}
+
 fn undo() -> Result<()> {
     anyhow::ensure!(!net_pin::svc::running(),
         "the service would re-apply at the next network change: stop it first (`net-pin service stop`), or use `net-pin off`");
@@ -421,6 +445,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("log") => show_log(rest),
+        Some("feature") => feature(rest),
+        Some("ram") => ramcli::main(rest),
         Some("undo") => undo(),
         Some("service") => match rest.first().map(String::as_str) {
             Some("run") => net_pin::svc::dispatch(),

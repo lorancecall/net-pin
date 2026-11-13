@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- Optional memory feature (off unless chosen at install or with `net-pin feature memory on|off`):
+  `net-pin ram` finds memory hogs and their launchers, groups everything one vendor installed into
+  app families, writes reviewable disable / undo scripts, records memory samples and reports leaks.
+  On-demand families: the service keeps a family's services, scheduled tasks and startup items off
+  (or on only while its app runs) and switches back off whatever an updater turns on, within 5
+  minutes. Originals are saved first and restored by `normal`, by turning memory off, or on
+  uninstall. Drivers and protected families are never switched.
+- Tray: a Memory menu (the feature switch, each on-demand family, the leak report); while memory is
+  on it records a sample every 5 minutes.
+- Setup: a Memory option (unchecked by default).
+
 ## 0.3.3
 
 - Kill switch: a VPN can name several programs (`programs=`, one rule per program and direction;

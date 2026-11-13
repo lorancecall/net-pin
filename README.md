@@ -18,6 +18,9 @@ their own way out. net-pin lets you decide.
   drivers. Every changed value is recorded first and restored on uninstall.
 - **Light:** a small background service re-applies your setup when the network changes, plus a tray
   icon and a `net-pin` command.
+- **Memory (optional):** keep app families you rarely use (everything one vendor installed: services,
+  scheduled tasks, startup items) switched off, or on only while their app runs; find memory hogs and
+  leaks. Off unless you choose it at install or run `net-pin feature memory on`.
 
 ## Install
 
@@ -68,6 +71,9 @@ net-pin route [add <a.b.c.d/n> via <network> | remove <a.b.c.d/n>]
 net-pin preset [<name>]
 net-pin set keep-connected on|off | top-metric 1-4
 net-pin config | log [n] | undo | service install|uninstall|start|stop | help
+net-pin feature memory on|off
+net-pin ram scan | family <name> | ondemand [<family> off|follow --app <exe>|start|stop|normal]
+net-pin ram cleanup <name> | sample | watch | leaks [--hours N] | history on|off | fast on|off | tray-icons [--prune]
 ```
 
 Names and descriptions accept `*` wildcards; in `programs`, `*` stands for a folder that changes
@@ -75,6 +81,25 @@ with updates (`C:\Program Files\NordVPN\*\nordvpn-service-app.exe`). A kill swit
 programs that make the VPN's connection, often a service rather than the app you open
 (`net-pin programs` lists the running ones). Tunnels that run inside Windows (NordLynx, WireGuard)
 send from the kernel, not from a program: block their port (`ports=udp:51820`). Settings are stored in `C:\ProgramData\net-pin\config.toml`.
+
+## Memory
+
+With memory on, the service keeps the families you put under on-demand control off: services
+Disabled, scheduled tasks and machine-wide startup items off, leftover processes in the vendor's
+folders closed. If an updater or another tool switches something back on, it is switched off again
+within 5 minutes. `follow --app <exe>` turns the family on while that app runs. Every original value
+is saved first (`C:\ProgramData\net-pin\ondemand.json`); `ondemand <family> normal`, turning memory
+off, or uninstalling puts them back. Drivers, Windows, security software and hardware vendors'
+families are never switched.
+
+```text
+net-pin ram scan                      memory hogs, their launchers, families
+net-pin ram ondemand "National Instruments" off
+```
+
+The tray's Memory menu switches the feature and each family, and records a memory sample every 5
+minutes for `net-pin ram leaks`. `net-pin ram cleanup <family>` only writes `disable.ps1` / `undo.ps1`
+scripts for you to review and run.
 
 ## How it works
 

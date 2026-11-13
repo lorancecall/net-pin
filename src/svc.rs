@@ -106,7 +106,7 @@ pub fn install() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Stops the service, puts back everything net-pin changed, and removes the service (admin; the
+/// Stops the service, puts back everything net-pin changed (network and memory), and removes the service (admin; the
 /// uninstaller). Also works when the service is already gone.
 pub fn uninstall() -> anyhow::Result<()> {
     crate::paths::ensure_may_write_data_dir()?;
@@ -118,6 +118,9 @@ pub fn uninstall() -> anyhow::Result<()> {
         for l in crate::undo()? { println!("{l}"); }
     } else {
         println!("nothing recorded: nothing to put back");
+    }
+    if crate::ram::daemon::state_path().exists() {
+        for l in crate::ram::daemon::restore_all() { println!("{l}"); }
     }
     match svc {
         Some(s) => { s.delete()?; println!("service {NAME} removed"); }

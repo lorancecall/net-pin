@@ -1,5 +1,5 @@
 ; Inno Setup script - build with .\build.ps1 (cargo build --release, tests, then ISCC.exe installer\net-pin.iss)
-#define AppVersion "0.3.3"
+#define AppVersion "0.4.0"
 
 [Setup]
 AppId={{5E0B8C51-7A2E-4B8F-9C3D-6F1A2B4E8D70}
@@ -26,6 +26,10 @@ UninstallDisplayIcon={app}\net-pin.exe
 ChangesEnvironment=yes
 ; The tray's Run value is per user (the user running setup).
 UsedUserAreasWarning=no
+
+[Tasks]
+; Optional memory feature (off unless chosen; remembered on upgrade). See net-pin ram help.
+Name: "memory"; Description: "Memory: keep chosen app families off and record memory samples (net-pin ram)"; Flags: unchecked
 
 [Files]
 Source: "..\target\release\net-pin.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -108,6 +112,11 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
     ForceDirectories(ExpandConstant('{commonappdata}\net-pin'));
+    { The memory switch is saved before the service starts (it reads it at start). }
+    if WizardIsTaskSelected('memory') then
+      RunNetPin('feature memory on', 'turning memory on')
+    else if FileExists(ExpandConstant('{commonappdata}\net-pin\service.toml')) then
+      RunNetPin('feature memory off', 'turning memory off');
     WizardForm.StatusLabel.Caption := 'Starting the net-pin service...';
     RunNetPin('service install', 'starting the service');
   end;
@@ -116,7 +125,8 @@ begin
            'Open a new terminal and run:' + #13#10 +
            '  net-pin status        what is pinned where' + #13#10 +
            '  net-pin help          all commands' + #13#10 +
-           '  net-pin preset        ready-made setups for common cases', mbInformation, MB_OK);
+           '  net-pin preset        ready-made setups for common cases' + #13#10 +
+           '  net-pin ram help      memory: app families, leaks (net-pin feature memory on|off)', mbInformation, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

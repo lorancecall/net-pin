@@ -60,13 +60,16 @@ fn serve_one(handler: &Handler) -> Result<()> {
 pub fn available() -> bool { std::path::Path::new(PATH).exists() }
 
 /// Client side: sends one request to the service and returns its reply.
-pub fn call(body: &Value) -> Result<Value> {
+pub fn call(body: &Value) -> Result<Value> { call_wait(body, std::time::Duration::from_secs(5)) }
+
+/// `call` with a longer wait for a busy service (a memory request can take a scan).
+pub fn call_wait(body: &Value, wait: std::time::Duration) -> Result<Value> {
     // A service that just started may not have its pipe yet; one that is busy has no free instance.
-    let mut tries = 0;
+    let start = std::time::Instant::now();
     let f = loop {
         match std::fs::OpenOptions::new().read(true).write(true).open(PATH) {
             Ok(f) => break f,
-            Err(_) if tries < 20 => { tries += 1; std::thread::sleep(std::time::Duration::from_millis(250)); }
+            Err(_) if start.elapsed() < wait => std::thread::sleep(std::time::Duration::from_millis(250)),
             Err(e) => return Err(e).context("the net-pin service is not running"),
         }
     };

@@ -31,6 +31,13 @@ pub fn data_dir() -> PathBuf {
     PathBuf::from(base).join(APP_DIR)
 }
 
+/// `%LOCALAPPDATA%\net-pin`: the user's memory samples, events and cleanup scripts.
+pub fn user_data_dir() -> PathBuf {
+    use windows::Win32::UI::Shell::FOLDERID_LocalAppData;
+    let base = known_folder(&FOLDERID_LocalAppData).or_else(|| std::env::var("LOCALAPPDATA").ok()).unwrap_or_else(|| ".".into());
+    PathBuf::from(base).join(APP_DIR)
+}
+
 /// Whether this process may write `data_dir()`: an override is set, or the process is elevated
 /// (the service, an admin console). A plain user must never create `%ProgramData%\net-pin`.
 pub fn may_write_data_dir() -> bool { std::env::var_os(DATA_ENV).is_some() || elevated() }
