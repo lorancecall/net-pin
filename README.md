@@ -82,6 +82,38 @@ programs that make the VPN's connection, often a service rather than the app you
 (`net-pin programs` lists the running ones). Tunnels that run inside Windows (NordLynx, WireGuard)
 send from the kernel, not from a program: block their port (`ports=udp:51820`). Settings are stored in `C:\ProgramData\net-pin\config.toml`.
 
+## Private LAN relay exceptions
+
+Default: no relay hosts, so the existing kill switch stays fully isolated. To let a
+userspace subnet router (such as Tailscale) contact selected LAN servers while keeping
+its external transport on Wi-Fi, configure these fields in its `[[vpns]]` entry:
+
+```toml
+relay_interface = "Ethernet"
+relay_hosts = ["192.168.50.1", "192.168.50.5"]
+```
+
+These are examples only, not automatic defaults. Each host must be an exact RFC1918
+IPv4 address; CIDRs, public IPs, IPv6 and wildcards are rejected. The adapter alias
+must match an existing Ethernet interface exactly. Empty `relay_hosts = []` removes
+all exceptions. Edit the list to add/remove hosts. For an unlocked VPN the CLI also
+supports `net-pin vpn <name> set relay_interface=Ethernet relay_hosts=192.168.50.5`
+(the list replaces the old list, and `relay_hosts=` clears it). Locked VPNs still
+require an administrator to edit protected `config.toml`, then run `net-pin apply`.
+
+The exception is **all ports and protocols, both directions, for the VPN program
+and those host addresses on that exact interface**. External IPv4 destinations and
+all IPv6 remain blocked there; other non-selected adapters stay fully blocked.
+This is not process-purpose isolation: Windows Firewall cannot distinguish a VPN's
+LAN relay socket from its tunnel transport socket to the same allowed LAN host.
+Do not add a local VPN/DERP endpoint unless that additional transport path is intended.
+Existing inbound/default firewall policy still applies; this feature removes net-pin's
+block at the selected hosts, not every other firewall restriction.
+
+Rule migrations retain old blocks until all replacement rules are installed, and
+the planner compares actual Windows remote-address filters rather than trusting
+descriptions. Wi-Fi disconnect does not permit external fallback onto Ethernet.
+
 ## Memory
 
 With memory on, the service keeps the families you put under on-demand control off: services

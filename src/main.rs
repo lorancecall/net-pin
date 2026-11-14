@@ -28,6 +28,8 @@ USAGE (* = admin console)
                      [ports=udp:51820,tcp:1194]   (programs: * stands for a version folder)
   net-pin vpn <name> set <key>=<value> ...   change any of the keys above (programs, ports and
                                  servers replace the list; an empty value clears it)
+                     [relay_interface=<exact Ethernet alias>] [relay_hosts=<private IP>,...]
+                                 relay_hosts replaces the LAN exceptions; empty clears them
   net-pin vpn remove <name>
   net-pin programs [filter]      running programs and their paths (for exe= / programs=)
   net-pin route                  list destination routes
@@ -191,10 +193,14 @@ fn vpn_keys(v: &mut Vpn, kvs: &[String]) -> Result<Option<String>> {
             "kind" => v.kind = match val { "server" => VpnKind::Server, "default-route" => VpnKind::DefaultRoute, _ => bail!("kind is default-route or server") },
             "servers" => v.servers = list(&[val.to_string()]),
             "ports" => v.ports = list(&[val.to_string()]),
+            "relay_interface" => v.relay_interface = val.into(),
+            "relay_hosts" => v.relay_hosts = list(&[val.to_string()]),
             _ => bail!("unknown key {k}"),
         }
     }
     anyhow::ensure!(!v.kill_switch || !v.all_programs().is_empty() || !v.ports.is_empty(), "a kill switch needs exe=<path>, programs= or ports=");
+    for host in &v.relay_hosts { anyhow::ensure!(host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_private()), "relay_hosts requires exact private IPv4 addresses (no prefixes): {host}"); }
+    anyhow::ensure!(v.relay_hosts.is_empty() || !v.relay_interface.is_empty(), "relay_hosts requires relay_interface=<exact Ethernet alias>");
     for s in &v.servers { anyhow::ensure!(model::parse_prefix(s).is_some(), "bad server address {s}"); }
     for s in &v.ports { anyhow::ensure!(model::parse_ports(s).is_some(), "bad port entry {s:?} (e.g. udp 51820)"); }
     Ok(via)
@@ -265,6 +271,7 @@ fn vpn(args: &[String]) -> Result<()> {
                 let kind = if v.kind == VpnKind::Server { format!(" servers {}", v.servers.join(",")) } else { String::new() };
                 println!("{:<14} via {:<8} kill switch {:<3}{} adapter {:?}{kind}", v.name, v.via,
                     if v.kill_switch { "on" } else { "off" }, if v.locked { " [locked]" } else { "" }, v.adapter);
+                if !v.relay_hosts.is_empty() { println!("{:<14} relay hosts {} on {:?} (all ports/protocols)", "", v.relay_hosts.join(","), v.relay_interface); }
                 for p in v.all_programs() { println!("{:<14} program {p}", ""); }
                 if !v.ports.is_empty() { println!("{:<14} ports {}", "", v.ports.join(", ")); }
             }
@@ -460,5 +467,29 @@ fn main() -> Result<()> {
         Some("version" | "--version" | "-V") => { println!("net-pin {}", net_pin::VERSION); Ok(()) }
         Some("help" | "-h" | "--help" | "/?") => { print!("{HELP}"); Ok(()) }
         Some(x) => bail!("unknown command {x}; see `net-pin help`"),
+    }
+}
+
+#[cfg(test)]
+mod relay_cli_tests {
+    use super::*;
+    #[test]
+    fn relay_host_list_can_be_set_replaced_and_cleared() {
+        let mut vpn = Vpn::default();
+        vpn_keys(&mut vpn, &["relay_interface=Ethernet".into(), "relay_hosts=192.168.50.1,192.168.50.5".into()]).unwrap();
+        assert_eq!(vpn.relay_hosts, ["192.168.50.1", "192.168.50.5"]);
+        vpn_keys(&mut vpn, &["relay_hosts=10.0.0.2".into()]).unwrap();
+        assert_eq!(vpn.relay_hosts, ["10.0.0.2"]);
+        vpn_keys(&mut vpn, &["relay_hosts=".into()]).unwrap();
+        assert!(vpn.relay_hosts.is_empty());
+    }
+
+    #[test]
+    fn relay_cli_rejects_public_prefix_and_missing_interface() {
+        for host in ["8.8.8.8", "192.168.50.0/24", "::1"] {
+            let mut vpn = Vpn::default();
+            assert!(vpn_keys(&mut vpn, &["relay_interface=Ethernet".into(), format!("relay_hosts={host}")]).is_err());
+        }
+        assert!(vpn_keys(&mut Vpn::default(), &["relay_hosts=192.168.50.5".into()]).is_err());
     }
 }

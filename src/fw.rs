@@ -47,6 +47,7 @@ pub fn rules() -> Vec<Rule> {
                 program: r.ApplicationName().map(|n| n.to_string()).unwrap_or_default(),
                 aliases: desc.split_once(ALIASES).map(|(_, a)| a.split(';').map(String::from).collect()).unwrap_or_default(),
                 ports: desc_ports(&desc),
+                remote_addresses: r.RemoteAddresses().map(|a| a.to_string()).unwrap_or_default(),
             });
         }
     }
@@ -78,12 +79,12 @@ fn desc_ports(desc: &str) -> Option<(u8, String)> {
 
 /// Replaces rule `name` with an enabled block rule for `program` (empty: every program) on
 /// `aliases`; with `ports`, only that protocol (6 / 17) and those remote ports.
-pub fn block(name: &str, program: &str, aliases: &[String], outbound: bool, ports: Option<&(u8, String)>) -> Result<()> {
+pub fn block(name: &str, program: &str, aliases: &[String], outbound: bool, ports: Option<&(u8, String)>, remote_addresses: &str) -> Result<()> {
     anyhow::ensure!(!aliases.is_empty(), "no interfaces: a rule without interfaces would block everywhere");
     let p = policy()?;
     unsafe {
         let rules = p.Rules()?;
-        let _ = rules.Remove(&BSTR::from(name));
+        // Add replaces by identifier; never remove existing protection before Add succeeds.
         let r: INetFwRule = CoCreateInstance(&NetFwRule, None, CLSCTX_INPROC_SERVER)?;
         r.SetName(&BSTR::from(name)).context("SetName")?;
         let pdesc = ports.map_or(String::new(), |(proto, list)| format!("{PORTS}{proto}/{list} "));
@@ -94,6 +95,7 @@ pub fn block(name: &str, program: &str, aliases: &[String], outbound: bool, port
             r.SetProtocol(*proto as i32).context("SetProtocol")?;
             r.SetRemotePorts(&BSTR::from(list.as_str())).context("SetRemotePorts")?;
         }
+        r.SetRemoteAddresses(&BSTR::from(remote_addresses)).context("SetRemoteAddresses")?;
         r.SetDirection(if outbound { NET_FW_RULE_DIR_OUT } else { NET_FW_RULE_DIR_IN }).context("SetDirection")?;
         r.SetAction(NET_FW_ACTION_BLOCK).context("SetAction")?;
         r.SetProfiles(NET_FW_PROFILE2_ALL.0).context("SetProfiles")?;

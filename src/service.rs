@@ -244,6 +244,10 @@ mod tests {
         new.vpns[0].via = "lan".into();
         assert!(check_config(&old, &new).is_err(), "moved");
         let mut new = old.clone();
+        new.vpns[0].relay_interface = "Ethernet".into();
+        new.vpns[0].relay_hosts = vec!["192.168.50.5".into()];
+        assert!(check_config(&old, &new).is_err(), "relay exceptions are admin-only for locked VPNs");
+        let mut new = old.clone();
         new.networks[0].kind = crate::model::Kind::Any;
         assert!(check_config(&old, &new).is_err(), "its network redefined");
         let mut new = old.clone();

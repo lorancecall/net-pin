@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- Optional exact-interface private IPv4 relay-host exceptions for userspace subnet routers.
+  Empty by default; private host addresses can be added/removed in config or unlocked VPN CLI settings.
+- Keep external IPv4 and IPv6 fail-closed on non-selected networks while allowing selected LAN hosts.
+- Read actual firewall remote-address filters and retain old blocks until replacement filters are verified.
+- Build replacement COM rules before Add instead of removing existing protection first.
+
 ## 0.4.0
 
 - Optional memory feature (off unless chosen at install or with `net-pin feature memory on|off`):
