@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- Encode relay complement filters as aligned IPv4 CIDRs and explicit IPv6 half-spaces, preserving the exact allowed-host exclusions.
+- Include rejected address filters in firewall-add errors.
+- Fix Windows `E_INVALIDARG` when adding relay-external rules. The old filter was rejected and the CIDR form accepted in an administrator-run disabled-rule diagnostic.
+- Add an opt-in administrator diagnostic script; it creates only disabled, uniquely named test rules and removes them immediately. End-to-end relay connectivity remains deployment-specific.
+
 ## 0.4.1
 
 - Optional exact-interface private IPv4 relay-host exceptions for userspace subnet routers.

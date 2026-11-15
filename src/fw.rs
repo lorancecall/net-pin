@@ -101,7 +101,7 @@ pub fn block(name: &str, program: &str, aliases: &[String], outbound: bool, port
         r.SetProfiles(NET_FW_PROFILE2_ALL.0).context("SetProfiles")?;
         r.SetInterfaces(&alias_list(aliases)?).context("SetInterfaces")?;
         r.SetEnabled(true.into()).context("SetEnabled")?;
-        rules.Add(&r).context("add")?;
+        rules.Add(&r).with_context(|| format!("add (remote addresses: {remote_addresses})"))?;
     }
     Ok(())
 }

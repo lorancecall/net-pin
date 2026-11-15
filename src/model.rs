@@ -409,6 +409,19 @@ struct RuleSpec {
     aliases: Vec<String>, remote_addresses: String,
 }
 
+/// Emit an inclusive IPv4 interval as aligned CIDRs, rather than one very broad
+/// address range. Use explicit /1 IPv6 blocks below as well: avoid /0 special
+/// handling in the Windows Firewall address parser. Coverage is unchanged.
+fn ipv4_interval_cidrs(mut start: u64, end: u64, out: &mut Vec<String>) {
+    while start <= end {
+        let aligned = if start == 0 { 32 } else { (start as u32).trailing_zeros() };
+        let remaining = 63 - (end - start + 1).leading_zeros();
+        let bits = aligned.min(remaining);
+        out.push(format!("{}/{}", Ipv4Addr::from(start as u32), 32 - bits));
+        start += 1u64 << bits;
+    }
+}
+
 /// Complement of exact private IPv4 hosts, including all IPv6. Invalid input fails closed.
 fn relay_complement(hosts: &[String]) -> Option<String> {
     if hosts.is_empty() { return None; }
@@ -424,14 +437,14 @@ fn relay_complement(hosts: &[String]) -> Option<String> {
     let mut start = 0u64;
     for value in values {
         if start < value as u64 {
-            ranges.push(format!("{}-{}", Ipv4Addr::from(start as u32), Ipv4Addr::from(value - 1)));
+            ipv4_interval_cidrs(start, value as u64 - 1, &mut ranges);
         }
         start = value as u64 + 1;
     }
     if start <= u32::MAX as u64 {
-        ranges.push(format!("{}-255.255.255.255", Ipv4Addr::from(start as u32)));
+        ipv4_interval_cidrs(start, u32::MAX as u64, &mut ranges);
     }
-    ranges.push("::/0".into());
+    ranges.extend(["::/1".into(), "8000::/1".into()]);
     Some(ranges.join(","))
 }
 
@@ -789,14 +802,49 @@ mod tests {
 
     #[test]
     fn relay_hosts_complement_and_input_validation() {
-        assert_eq!(relay_complement(&relay_config().vpns[0].relay_hosts).unwrap(),
-            "0.0.0.0-192.168.50.0,192.168.50.2-192.168.50.4,192.168.50.6-255.255.255.255,::/0");
+        assert!(same_addresses(&relay_complement(&relay_config().vpns[0].relay_hosts).unwrap(),
+            "0.0.0.0-192.168.50.0,192.168.50.2-192.168.50.4,192.168.50.6-255.255.255.255,::/0"));
         for bad in ["0.0.0.0", "8.8.8.8", "::1", "192.168.50.0/24", "*", "127.0.0.1", "169.254.1.1"] {
             assert!(relay_complement(&[bad.into()]).is_none(), "{bad}");
         }
         assert!(relay_complement(&[]).is_none());
         let one = relay_complement(&["10.0.0.1".into()]).unwrap();
         assert_eq!(one, relay_complement(&["10.0.0.1".into(), "10.0.0.1".into()]).unwrap());
+    }
+
+    #[test]
+    fn relay_cidrs_preserve_exact_host_exclusions() {
+        for hosts in [
+            vec!["192.168.50.1", "192.168.50.4", "192.168.50.5"],
+            vec!["10.0.0.0", "10.0.0.1", "10.255.255.255"],
+            vec!["172.16.0.0", "172.31.255.255", "192.168.255.255"],
+            vec!["192.168.50.5", "192.168.50.1", "192.168.50.5"],
+        ] {
+            let hosts: Vec<String> = hosts.into_iter().map(String::from).collect();
+            let complement = relay_complement(&hosts).unwrap();
+            assert!(!complement.contains('-'));
+            assert!(!complement.split(',').any(|c| c.ends_with("/0")));
+            let mut expected: Vec<(u8, u128, u128)> = Vec::new();
+            let mut ips: Vec<u32> = hosts.iter().map(|h| u32::from(h.parse::<Ipv4Addr>().unwrap())).collect();
+            ips.sort_unstable();
+            ips.dedup();
+            let mut start = 0u128;
+            for ip in ips {
+                if start < ip as u128 { expected.push((4, start, ip as u128 - 1)); }
+                start = ip as u128 + 1;
+            }
+            expected.push((4, start, u32::MAX as u128));
+            expected.push((6, 0, u128::MAX));
+            assert_eq!(address_ranges(&complement).unwrap(), expected);
+            // A canonicalized mask returned by Windows must not trigger reapply.
+            let windows = complement.split(',').map(|c| {
+                let (addr, prefix) = c.split_once('/').unwrap();
+                if addr.contains(':') { return c.to_owned(); }
+                let prefix: u32 = prefix.parse().unwrap();
+                format!("{addr}/{}", Ipv4Addr::from(u32::MAX << (32 - prefix)))
+            }).collect::<Vec<_>>().join(",");
+            assert!(same_addresses(&complement, &windows));
+        }
     }
 
     #[test]
@@ -809,7 +857,7 @@ mod tests {
         for rule in &rules {
             if rule.name.ends_with("relay external") {
                 assert_eq!(rule.aliases, ["Ethernet"]);
-                assert!(rule.remote_addresses.ends_with(",::/0"));
+                assert!(rule.remote_addresses.ends_with(",::/1,8000::/1"));
             } else {
                 assert_eq!(rule.remote_addresses, "*");
                 assert!(!rule.aliases.contains(&"Ethernet".into()));
@@ -882,7 +930,7 @@ mod tests {
         snap.adapters.iter_mut().find(|a| a.alias == "Wi-Fi").unwrap().up = false;
         let rules = planned_rules(&plan(&cfg, &snap, &State::default()));
         assert_eq!(rules.len(), 4);
-        assert!(rules.iter().filter(|r| r.name.ends_with("external")).all(|r| r.remote_addresses.ends_with("::/0")));
+        assert!(rules.iter().filter(|r| r.name.ends_with("external")).all(|r| r.remote_addresses.ends_with("::/1,8000::/1")));
     }
     fn ad(index: u32, alias: &str, desc: &str, up: bool, metric: u32, if_type: u32) -> Adapter {
         Adapter { index, alias: alias.into(), description: desc.into(), up, metric, auto_metric: true, if_type }
