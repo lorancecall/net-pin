@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3
+
+- Keep old relay firewall rules until replacements are verified when changing the relay interface. Interface-qualified rule names prevent an Add from overwriting the previous interface's protection mid-migration.
+- Read actual Windows Firewall interface, protocol, port, direction, action and scope properties; descriptions are informational, not evidence that a kill switch is effective. Unreadable rules cannot authorize retirement of old guards.
+- Add partial-failure migration and firewall-property verification regression tests.
+
+
 ## 0.4.2
 
 - Encode relay complement filters as aligned IPv4 CIDRs and explicit IPv6 half-spaces, preserving the exact allowed-host exclusions.

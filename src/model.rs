@@ -255,9 +255,14 @@ impl std::fmt::Display for Route {
 
 fn all_addresses() -> String { "*".into() }
 
-/// One of net-pin's firewall rules (group `fw::GROUP`). `aliases` comes from the rule's description, which net-pin writes.
+/// One of net-pin's firewall rules, read from actual COM properties (not its description).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
+    #[serde(default)]
+    pub outbound: bool,
+    /// All security-relevant COM scope properties were read and validated.
+    #[serde(default)]
+    pub verified: bool,
     pub name: String,
     pub enabled: bool,
     /// Empty: every program.
@@ -480,15 +485,19 @@ fn rule_specs(v: &Vpn, snap: &Snapshot, keep: &[u32], problems: &mut Vec<String>
     if configured && relay.is_none() {
         problems.push(format!("{}: relay exception requires exact private IPv4 hosts and an existing non-VPN Ethernet interface; full block retained", v.name));
     }
+    // Keep both generations until all new rules are verified. Reusing names when
+    // moving relay A -> B overwrites A's protection before B's other-interface
+    // block exists. UTF-8 hex is collision-free and cannot inject name delimiters.
+    let relay_id: String = v.relay_interface.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
     let mut scoped = Vec::new();
     for (name, program, outbound, ports) in out {
         // Global/kernel-port rules never receive relay exceptions.
         if let Some(addresses) = relay.as_ref().filter(|_| !program.is_empty() && ports.is_none()) {
-            scoped.push(RuleSpec { name: format!("{name} relay external"), program: program.clone(), outbound,
+            scoped.push(RuleSpec { name: format!("{name} [relay:{relay_id}] relay external"), program: program.clone(), outbound,
                 ports: None, aliases: vec![v.relay_interface.clone()], remote_addresses: addresses.clone() });
             let others: Vec<String> = aliases.iter().filter(|a| **a != v.relay_interface).cloned().collect();
             if !others.is_empty() {
-                scoped.push(RuleSpec { name: format!("{name} relay other interfaces"), program, outbound,
+                scoped.push(RuleSpec { name: format!("{name} [relay:{relay_id}] relay other interfaces"), program, outbound,
                     ports: None, aliases: others, remote_addresses: "*".into() });
             }
         } else if !aliases.is_empty() {
@@ -608,7 +617,7 @@ pub fn plan(cfg: &Config, snap: &Snapshot, state: &State) -> Plan {
         .all(|spec| snap.rules.iter().any(|r| rule_matches(r, spec)));
     let stale: Vec<(String, bool)> = snap.rules.iter().filter(|r| !wanted.contains(&&r.name)).map(|r| {
         let mut guarded = specs.iter().filter(|(v, _)| guarding(cfg, v)
-            && (v.all_programs().iter().any(|prog| prog.eq_ignore_ascii_case(&r.program))
+            && (!r.verified || v.all_programs().iter().any(|prog| prog.eq_ignore_ascii_case(&r.program))
                 || (r.program.is_empty() && v.ports.iter().any(|port| parse_ports(port) == r.ports))));
         (r.name.clone(), guarded.all(|(v, rules)| in_place(v, rules)))
     }).collect();
@@ -632,7 +641,7 @@ fn block_rules(p: &mut Plan, snap: &Snapshot, rules: &[RuleSpec]) {
 }
 
 fn rule_matches(r: &Rule, spec: &RuleSpec) -> bool {
-    r.name == spec.name && r.enabled && r.aliases == spec.aliases
+    r.name == spec.name && r.enabled && r.verified && r.outbound == spec.outbound && r.aliases == spec.aliases
         && r.program.eq_ignore_ascii_case(&spec.program) && r.ports == spec.ports
         && same_addresses(&r.remote_addresses, &spec.remote_addresses)
 }
@@ -793,8 +802,8 @@ mod tests {
 
     fn planned_rules(p: &Plan) -> Vec<Rule> {
         p.actions.iter().filter_map(|a| match a {
-            Action::BlockRule { name, program, aliases, ports, remote_addresses, .. } => Some(Rule {
-                name: name.clone(), enabled: true, program: program.clone(), aliases: aliases.clone(),
+            Action::BlockRule { name, program, aliases, ports, remote_addresses, outbound } => Some(Rule {
+                name: name.clone(), enabled: true, verified: true, outbound: *outbound, program: program.clone(), aliases: aliases.clone(),
                 ports: ports.clone(), remote_addresses: remote_addresses.clone(),
             }), _ => None
         }).collect()
@@ -921,6 +930,46 @@ mod tests {
         let p = plan(&cfg, &snap, &State::default());
         assert!(!p.actions.iter().any(|a| matches!(a, Action::RemoveRule { .. })));
         assert!(planned_rules(&p).iter().all(|r| r.remote_addresses == "*"));
+    }
+
+    #[test]
+    fn relay_adapter_migration_preserves_old_generation_on_partial_failure() {
+        let mut cfg = relay_config();
+        let mut snap = both_up();
+        snap.rules = planned_rules(&plan(&cfg, &snap, &State::default()));
+        let old = snap.rules.clone();
+        cfg.vpns[0].relay_interface = "Ethernet 2".into();
+        let p = plan(&cfg, &snap, &State::default());
+        let new = planned_rules(&p);
+        assert_eq!(new.len(), 4);
+        assert!(new.iter().all(|n| old.iter().all(|o| n.name != o.name)));
+        assert!(!p.actions.iter().any(|a| matches!(a, Action::RemoveRule { .. })));
+        // Simulate every possible individual Add failure: old rules must survive.
+        for missing in 0..new.len() {
+            snap.rules = old.clone();
+            snap.rules.extend(new.iter().enumerate().filter(|(i, _)| *i != missing).map(|(_, r)| r.clone()));
+            assert!(!plan(&cfg, &snap, &State::default()).actions.iter().any(|a| matches!(a, Action::RemoveRule { .. })));
+        }
+        snap.rules = old;
+        snap.rules.extend(new);
+        assert_eq!(plan(&cfg, &snap, &State::default()).actions.iter().filter(|a| matches!(a, Action::RemoveRule { .. })).count(), 4);
+    }
+
+    #[test]
+    fn unverified_or_wrong_direction_rules_never_retire_old_guards() {
+        let cfg = relay_config();
+        let mut snap = both_up();
+        let old = planned_rules(&plan(&tailscale(), &snap, &State::default()));
+        let new = planned_rules(&plan(&cfg, &snap, &State::default()));
+        for direction in [false, true] {
+            snap.rules = old.clone();
+            snap.rules.extend(new.clone());
+            if direction { snap.rules[old.len()].outbound = !snap.rules[old.len()].outbound; }
+            else { snap.rules[old.len()].verified = false; }
+            let p = plan(&cfg, &snap, &State::default());
+            assert_eq!(planned_rules(&p).len(), 1);
+            assert!(!p.actions.iter().any(|a| matches!(a, Action::RemoveRule { .. })));
+        }
     }
 
     #[test]
@@ -1073,8 +1122,8 @@ mod tests {
         snap.policy = Some(0);
         snap.adapters[0].metric = 1; snap.adapters[0].auto_metric = false;
         for a in &p.actions { if let Action::AddRoute(x) = a { snap.routes.push(*x); } }
-        snap.rules = p.actions.iter().filter_map(|a| if let Action::BlockRule { name, program, aliases, ports, remote_addresses, .. } = a {
-            Some(Rule { name: name.clone(), enabled: true, program: program.clone(), aliases: aliases.clone(), ports: ports.clone(), remote_addresses: remote_addresses.clone() }) } else { None }).collect();
+        snap.rules = p.actions.iter().filter_map(|a| if let Action::BlockRule { name, program, aliases, ports, remote_addresses, outbound } = a {
+            Some(Rule { name: name.clone(), enabled: true, verified: true, outbound: *outbound, program: program.clone(), aliases: aliases.clone(), ports: ports.clone(), remote_addresses: remote_addresses.clone() }) } else { None }).collect();
         assert_eq!(plan(&cfg, &snap, &state).actions, vec![]);
         assert_eq!(state.metrics["Wi-Fi"], (true, 40));
 
@@ -1095,7 +1144,7 @@ mod tests {
     }
 
     fn rule(name: &str, aliases: &[&str]) -> Rule {
-        Rule { name: name.into(), enabled: true, program: TAILSCALED.into(), aliases: aliases.iter().map(|a| a.to_string()).collect(), ports: None, remote_addresses: "*".into() }
+        Rule { name: name.into(), enabled: true, verified: true, outbound: name.contains("out"), program: TAILSCALED.into(), aliases: aliases.iter().map(|a| a.to_string()).collect(), ports: None, remote_addresses: "*".into() }
     }
 
     #[test]
@@ -1147,7 +1196,7 @@ mod tests {
     #[test]
     fn removed_port_rule_goes_and_common_ports_are_refused() {
         let (mut cfg, mut snap) = nord();
-        snap.rules.push(Rule { name: "net-pin: NordVPN udp 1194 out".into(), enabled: true, program: String::new(),
+        snap.rules.push(Rule { name: "net-pin: NordVPN udp 1194 out".into(), enabled: true, verified: true, outbound: true, program: String::new(),
                                aliases: vec!["Ethernet".into()], ports: Some((17, "1194".into())), remote_addresses: "*".into() });
         cfg.vpns[0].ports.push("tcp 443".into());
         let p = plan(&cfg, &snap, &State::default());
